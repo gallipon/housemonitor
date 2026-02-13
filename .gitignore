@@ -1,0 +1,27 @@
+# 環境変数・認証情報
+.env
+server/.env
+raspi/.env
+
+# Python
+*.pyc
+__pycache__/
+
+# ログ
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+
+# IDE
+.vscode/
+.idea/
+
+# ローカルドキュメント
+local_docs/
+
+# Claude Code
+.claude/
+CLAUDE.md

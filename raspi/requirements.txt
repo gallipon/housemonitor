@@ -1,0 +1,4 @@
+smbus2
+retry
+RPi.GPIO
+python-dotenv
