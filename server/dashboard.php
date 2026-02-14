@@ -23,10 +23,60 @@ session_set_cookie_params([
 ]);
 session_start();
 
+// データベース接続（トークン認証用）
+require_once __DIR__ . '/db_config.php';
+$mysqli = getDbConnection();
+
 // セッション認証チェック
 if (empty($_SESSION['authenticated'])) {
-    header('Location: login.php');
-    exit();
+    // セッション認証が無効な場合、Remember Tokenをチェック
+    $token_valid = false;
+
+    if (isset($_COOKIE['remember_token']) && $mysqli) {
+        $token = $_COOKIE['remember_token'];
+
+        // DBでトークンを検証（有効期限内かつ存在するか）
+        $stmt = $mysqli->prepare("
+            SELECT user_id
+            FROM remember_tokens
+            WHERE token = ? AND expires_at > NOW()
+        ");
+        $stmt->bind_param('s', $token);
+        $stmt->execute();
+        $result = $stmt->get_result();
+
+        if ($row = $result->fetch_assoc()) {
+            // トークンが有効 → セッション発行
+            session_regenerate_id(true);
+            $_SESSION['authenticated'] = true;
+            $_SESSION['user_id'] = $row['user_id'];
+            $_SESSION['login_time'] = time();
+            $token_valid = true;
+
+            // 最終利用日時を更新
+            $stmt_update = $mysqli->prepare("UPDATE remember_tokens SET last_used_at = NOW() WHERE token = ?");
+            $stmt_update->bind_param('s', $token);
+            $stmt_update->execute();
+            $stmt_update->close();
+
+            // 最終ログイン日時を更新
+            $stmt_login = $mysqli->prepare("UPDATE users SET last_login_at = NOW() WHERE id = ?");
+            $stmt_login->bind_param('i', $row['user_id']);
+            $stmt_login->execute();
+            $stmt_login->close();
+        }
+        $stmt->close();
+    }
+
+    // トークンも無効ならログインページへ
+    if (!$token_valid) {
+        // 無効なトークンCookieがあれば削除
+        if (isset($_COOKIE['remember_token'])) {
+            setcookie('remember_token', '', time() - 3600, '/', '', true, true);
+        }
+        header('Location: login.php');
+        exit();
+    }
 }
 
 // セキュリティヘッダー設定
@@ -40,13 +90,15 @@ if (!isset($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 
-// データベース接続
-require_once __DIR__ . '/db_config.php';
-$mysqli = getDbConnection();
-if (!$mysqli) {
-    http_response_code(500);
-    echo json_encode(['error' => 'Database connection failed']);
-    exit;
+// データベース接続確認（トークン認証で既に接続済みの場合はスキップ）
+if (!isset($mysqli) || !$mysqli) {
+    require_once __DIR__ . '/db_config.php';
+    $mysqli = getDbConnection();
+    if (!$mysqli) {
+        http_response_code(500);
+        echo json_encode(['error' => 'Database connection failed']);
+        exit;
+    }
 }
 
 // 入力値検証関数
@@ -187,9 +239,18 @@ if (isset($_GET['action'])) {
       z-index: 9999;
       max-width: 300px;
     }
+    .logout-btn {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      z-index: 9998;
+    }
   </style>
 </head>
 <body>
+<a href="logout.php" class="btn btn-sm btn-secondary logout-btn">
+  <i class="fa fa-sign-out"></i> ログアウト
+</a>
 <div class="container">
   <!-- タブコンテンツ -->
   <div class="tab-content">
