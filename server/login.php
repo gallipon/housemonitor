@@ -67,6 +67,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             // Remember Me 処理
             $remember_me = isset($_POST['remember_me']) && $_POST['remember_me'] === '1';
+
             if ($remember_me && $mysqli) {
                 // ランダムトークン生成（64文字）
                 $token = bin2hex(random_bytes(32));
@@ -85,7 +86,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'path' => '/',
                         'secure' => true,
                         'httponly' => true,
-                        'samesite' => 'Strict'
+                        'samesite' => 'Lax'
                     ]);
                 }
                 $stmt->close();

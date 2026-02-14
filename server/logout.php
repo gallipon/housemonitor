@@ -38,7 +38,13 @@ if (isset($_COOKIE['remember_token']) && $mysqli) {
     $stmt->close();
 
     // Cookieを削除
-    setcookie('remember_token', '', time() - 3600, '/', '', true, true);
+    setcookie('remember_token', '', [
+        'expires' => time() - 3600,
+        'path' => '/',
+        'secure' => true,
+        'httponly' => true,
+        'samesite' => 'Lax'
+    ]);
 }
 
 // セッションを破棄

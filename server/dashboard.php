@@ -72,7 +72,13 @@ if (empty($_SESSION['authenticated'])) {
     if (!$token_valid) {
         // 無効なトークンCookieがあれば削除
         if (isset($_COOKIE['remember_token'])) {
-            setcookie('remember_token', '', time() - 3600, '/', '', true, true);
+            setcookie('remember_token', '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'secure' => true,
+                'httponly' => true,
+                'samesite' => 'Lax'
+            ]);
         }
         header('Location: login.php');
         exit();
