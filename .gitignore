@@ -25,3 +25,8 @@ local_docs/
 # Claude Code
 .claude/
 CLAUDE.md
+
+# 旧ファイル（並行稼働のため残置）
+server/qaqaqaa.php
+server/qaqaqab.php
+server/qmqmqm.php
