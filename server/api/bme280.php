@@ -51,7 +51,10 @@ $stmt->bind_param('dddss', $temperature, $humidity, $pressure, $measured_at, $cr
 
 if (!$stmt->execute()) {
     error_log("BME280 insert error: " . $stmt->error);
+    $stmt->close();
+    $mysqli->close();
     http_response_code(500);
+    exit;
 }
 
 $stmt->close();

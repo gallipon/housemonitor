@@ -50,7 +50,10 @@ $stmt->bind_param('iiss', $sensor_no, $count, $measured_at, $created_at);
 
 if (!$stmt->execute()) {
     error_log("PIR insert error: " . $stmt->error);
+    $stmt->close();
+    $mysqli->close();
     http_response_code(500);
+    exit;
 }
 
 $stmt->close();
