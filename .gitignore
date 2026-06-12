@@ -21,10 +21,15 @@ nul
 
 # ローカルドキュメント
 local_docs/
+.local_docs/
+archive/
+docs/issues.md
+*.stackdump
 
 # Claude Code
 .claude/
 CLAUDE.md
+CLAUDE.local.md
 
 # 旧ファイル（並行稼働のため残置）
 server/qaqaqaa.php
