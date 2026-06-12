@@ -27,6 +27,7 @@
 
 ## 実装メモ
 
+- **フレームワークレスの素の PHP**: サーバー側は小規模（API 2本 + ダッシュボード）のため、フレームワークを使わず素の PHP で実装
 - **BME280 の生データ補正**: 32 個のキャリブレーションパラメータを読み出し、データシートの補正式（temperature / pressure / humidity、`t_fine` 共有）を実装
 - **API 認証**: `X-API-Key` ヘッダー + `hash_equals()` によるタイミング攻撃対策。不一致は 401
 - **ダッシュボード認証**: PHP セッション + Remember Me（Cookie は Secure / HttpOnly / SameSite=Strict）、CSRF 対策、`session_regenerate_id()` によるセッション固定攻撃対策
