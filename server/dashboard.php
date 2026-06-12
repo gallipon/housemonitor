@@ -112,6 +112,11 @@ function validateInput($value, $type) {
     switch ($type) {
         case 'action':
             return in_array($value, ['thp', 'pir'], true) ? $value : null;
+        case 'sensor_no':
+            $sensor_no = filter_var($value, FILTER_VALIDATE_INT, [
+                'options' => ['min_range' => 1, 'max_range' => 10]
+            ]);
+            return $sensor_no !== false ? $sensor_no : 1;
         case 'offset':
             $offset = filter_var($value, FILTER_VALIDATE_INT, [
                 'options' => ['min_range' => 0, 'max_range' => 10000]
@@ -177,8 +182,9 @@ if (isset($_GET['action'])) {
         }
 
         if ($action === 'pir') {
-            $stmt = $mysqli->prepare("SELECT * FROM hc_sr501 WHERE measured_at <= ? ORDER BY measured_at DESC LIMIT ?, 144");
-            $stmt->bind_param('si', $from, $offset);
+            $sensor_no = validateInput($_GET['sensor_no'] ?? 1, 'sensor_no');
+            $stmt = $mysqli->prepare("SELECT * FROM hc_sr501 WHERE sensor_no = ? AND measured_at <= ? ORDER BY measured_at DESC LIMIT ?, 144");
+            $stmt->bind_param('isi', $sensor_no, $from, $offset);
             $stmt->execute();
             $result = $stmt->get_result();
 
@@ -251,6 +257,8 @@ if (isset($_GET['action'])) {
       left: 10px;
       z-index: 9998;
     }
+    #roomMix canvas { height: 260px; }
+    .mix-section-label { font-size: 0.8rem; color: #6c757d; text-align: center; margin: 6px 0 2px; }
   </style>
 </head>
 <body>
@@ -260,23 +268,53 @@ if (isset($_GET['action'])) {
 <div class="container">
   <!-- タブコンテンツ -->
   <div class="tab-content">
-    <!-- 温湿度・気圧 -->
-    <div class="tab-pane fade show active" id="thp">
-      <div id="chart-thp"></div>
-      <div class="row latest-values text-white mt-2">
-        <p class="col-sm-3 p-1 bg-info text-center" id="latest-measured-thp"></p>
-        <p class="col-sm-3 p-1 bg-danger text-center" id="latest-temp"></p>
-        <p class="col-sm-3 p-1 bg-primary text-center" id="latest-humid"></p>
-        <p class="col-sm-3 p-1 bg-success text-center" id="latest-press"></p>
+    <!-- 部屋A（温湿度・気圧 / 人感 切替） -->
+    <div class="tab-pane fade show active" id="roomA">
+      <div class="btn-group btn-group-sm w-100 mb-2" role="group" id="roomA-subtabs">
+        <button type="button" class="btn btn-primary active" data-subtab="thp">温度・湿度・気圧</button>
+        <button type="button" class="btn btn-outline-primary" data-subtab="pir-a">人感センサー</button>
+      </div>
+      <div id="roomA-thp">
+        <div id="chart-thp"></div>
+        <div class="row latest-values text-white mt-2">
+          <p class="col-sm-3 p-1 bg-info text-center" id="latest-measured-thp"></p>
+          <p class="col-sm-3 p-1 bg-danger text-center" id="latest-temp"></p>
+          <p class="col-sm-3 p-1 bg-primary text-center" id="latest-humid"></p>
+          <p class="col-sm-3 p-1 bg-success text-center" id="latest-press"></p>
+        </div>
+      </div>
+      <div id="roomA-pir-a" style="display: none;">
+        <div id="chart-pir-a"></div>
+        <div class="row latest-values text-dark mt-2">
+          <p class="col-sm-6 p-1 bg-info text-white text-center" id="latest-measured-pir-a"></p>
+          <p class="col-sm-6 p-1 bg-warning text-dark text-center" id="latest-count-a"></p>
+        </div>
       </div>
     </div>
 
-    <!-- PIR -->
-    <div class="tab-pane fade" id="pir">
-      <div id="chart-pir"></div>
+    <!-- 部屋B（人感のみ） -->
+    <div class="tab-pane fade" id="roomB">
+      <div id="chart-pir-b"></div>
       <div class="row latest-values text-dark mt-2">
-        <p class="col-sm-6 p-1 bg-info text-white text-center" id="latest-measured-pir"></p>
-        <p class="col-sm-6 p-1 bg-warning text-dark text-center" id="latest-count"></p>
+        <p class="col-sm-6 p-1 bg-info text-white text-center" id="latest-measured-pir-b"></p>
+        <p class="col-sm-6 p-1 bg-warning text-dark text-center" id="latest-count-b"></p>
+      </div>
+    </div>
+
+    <!-- まとめ（温湿度気圧＋PIR比較） -->
+    <div class="tab-pane fade" id="roomMix">
+      <p class="mix-section-label">温度・湿度・気圧（部屋A）</p>
+      <div id="chart-mix-thp"></div>
+      <div class="row latest-values text-white mt-1 mb-3">
+        <p class="col-4 p-1 bg-danger text-center" id="mix-latest-temp">温度 : -</p>
+        <p class="col-4 p-1 bg-primary text-center" id="mix-latest-humid">湿度 : -</p>
+        <p class="col-4 p-1 bg-success text-center" id="mix-latest-press">気圧 : -</p>
+      </div>
+      <p class="mix-section-label">人感センサー比較（部屋A・B）</p>
+      <div id="chart-mix-pir"></div>
+      <div class="row latest-values mt-1">
+        <p class="col-6 p-1 bg-warning text-dark text-center" id="mix-latest-a">部屋A : -</p>
+        <p class="col-6 p-1 bg-light text-dark text-center" id="mix-latest-b">部屋B : -</p>
       </div>
     </div>
   </div>
@@ -319,10 +357,13 @@ if (isset($_GET['action'])) {
 <div class="bottom-tabs">
   <ul class="nav nav-tabs nav-fill">
     <li class="nav-item">
-      <a class="nav-link active" data-toggle="tab" href="#thp">温度・湿度・気圧</a>
+      <a class="nav-link active" data-toggle="tab" href="#roomA">部屋A</a>
     </li>
     <li class="nav-item">
-      <a class="nav-link" data-toggle="tab" href="#pir">人感センサー</a>
+      <a class="nav-link" data-toggle="tab" href="#roomB">部屋B</a>
+    </li>
+    <li class="nav-item">
+      <a class="nav-link" data-toggle="tab" href="#roomMix">まとめ</a>
     </li>
   </ul>
 </div>
@@ -370,7 +411,10 @@ function showSecurityAlert(message, type = 'info') {
 
 /* ---- Chart & Ajax handling ---- */
 let chartTHP = null;
-let chartPIR = null;
+let chartPIR_A = null;
+let chartPIR_B = null;
+let chartMixTHP = null;
+let chartMixPIR = null;
 
 // チャート設定の共通オプション
 const CHART_COMMON_OPTIONS = {
@@ -460,8 +504,39 @@ function createPIRChart(canvas) {
   });
 }
 
+function createMixPIRChart(canvas) {
+  return new Chart(canvas, {
+    type: 'line',
+    data: {
+      datasets: [
+        {
+          label: '部屋A',
+          data: [],
+          borderColor: 'rgba(240,180,20,0.9)',
+          backgroundColor: 'rgba(240,180,20,0.15)',
+          fill: false
+        },
+        {
+          label: '部屋B',
+          data: [],
+          borderColor: 'rgba(100,60,200,0.9)',
+          backgroundColor: 'rgba(100,60,200,0.15)',
+          fill: false
+        }
+      ]
+    },
+    options: {
+      ...CHART_COMMON_OPTIONS,
+      scales: {
+        ...CHART_COMMON_OPTIONS.scales,
+        yAxes: [{ ticks: { beginAtZero: true } }]
+      }
+    }
+  });
+}
+
 // Ajax: dashboard.php?action=thp or pir
-function fetchSensor(sensor, from, cb) {
+function fetchSensor(sensor, from, cb, sensorNo) {
   // 入力値検証
   if (!['thp', 'pir'].includes(sensor)) {
     console.error('無効なセンサータイプ:', sensor);
@@ -477,11 +552,16 @@ function fetchSensor(sensor, from, cb) {
     return;
   }
 
-  $.getJSON(scriptName, {
+  const params = {
     action: sensor,
     from: encodeURIComponent(from),
     offset: 0
-  }, function(json){
+  };
+  if (sensor === 'pir' && sensorNo) {
+    params.sensor_no = sensorNo;
+  }
+
+  $.getJSON(scriptName, params, function(json){
     // レスポンスの基本検証
     if (!json || typeof json !== 'object') {
       console.error('無効なレスポンス形式');
@@ -571,17 +651,17 @@ function updateTHP(json) {
   $('#latest-press').text(`気圧 : ${current.pressure}${getChangeArrow(current.pressure, previous.pressure)}`);
 }
 
-function updatePIR(json) {
+function updatePIR(json, chart, elMeasured, elCount) {
   if (!json) return;
 
   // チャートデータ更新
-  chartPIR.data.labels = json.measures;
-  chartPIR.data.datasets[0].data = json.counts;
-  chartPIR.update();
+  chart.data.labels = json.measures;
+  chart.data.datasets[0].data = json.counts;
+  chart.update();
 
   if (json.measures.length === 0) {
-    $('#latest-measured-pir').text('');
-    $('#latest-count').text('カウント : -');
+    $(elMeasured).text('');
+    $(elCount).text('カウント : -');
     return;
   }
 
@@ -589,11 +669,50 @@ function updatePIR(json) {
   const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
 
   if (latestDetection) {
-    $('#latest-measured-pir').text(formatTimeDisplay(latestDetection.time));
-    $('#latest-count').text(`カウント : ${latestDetection.count}`);
+    $(elMeasured).text(formatTimeDisplay(latestDetection.time));
+    $(elCount).text(`カウント : ${latestDetection.count}`);
   } else {
-    $('#latest-measured-pir').text('検出なし');
-    $('#latest-count').text('カウント : 0');
+    $(elMeasured).text('検出なし');
+    $(elCount).text('カウント : 0');
+  }
+}
+
+function updateMixTHP(json) {
+  if (!json) return;
+  chartMixTHP.data.labels = json.measures;
+  chartMixTHP.data.datasets[0].data = json.temps;
+  chartMixTHP.data.datasets[1].data = json.humids;
+  chartMixTHP.data.datasets[2].data = json.pressures;
+  chartMixTHP.update();
+
+  if (json.measures.length === 0) {
+    $('#mix-latest-temp').text('温度 : -');
+    $('#mix-latest-humid').text('湿度 : -');
+    $('#mix-latest-press').text('気圧 : -');
+    return;
+  }
+
+  const last = json.measures.length - 1;
+  const prev = Math.max(0, last - 1);
+  $('#mix-latest-temp').text(`温度 : ${json.temps[last]}${getChangeArrow(json.temps[last], json.temps[prev])}`);
+  $('#mix-latest-humid').text(`湿度 : ${json.humids[last]}${getChangeArrow(json.humids[last], json.humids[prev])}`);
+  $('#mix-latest-press').text(`気圧 : ${json.pressures[last]}${getChangeArrow(json.pressures[last], json.pressures[prev])}`);
+}
+
+function updateMixPIR(json, room) {
+  if (!json) return;
+  const dsIdx = (room === 'A') ? 0 : 1;
+  // {x, y}形式で渡すことで両センサーが独立したタイムスタンプを持てる
+  chartMixPIR.data.datasets[dsIdx].data = json.measures.map((t, i) => ({ x: t, y: json.counts[i] }));
+  chartMixPIR.update();
+
+  const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
+  const elId = (room === 'A') ? '#mix-latest-a' : '#mix-latest-b';
+  const label = (room === 'A') ? '部屋A' : '部屋B';
+  if (latestDetection) {
+    $(elId).text(`${label} : ${formatTimeDisplay(latestDetection.time)} (${latestDetection.count}回)`);
+  } else {
+    $(elId).text(`${label} : 検出なし`);
   }
 }
 
@@ -615,19 +734,31 @@ function formatForAjaxMoment(m) {
   return m.format('YYYY-MM-DD HH:mm:ss');
 }
 
+function fetchRoomData(from, room) {
+  if (room === '#roomA') {
+    fetchSensor('thp', from, updateTHP);
+    fetchSensor('pir', from, function(json) {
+      updatePIR(json, chartPIR_A, '#latest-measured-pir-a', '#latest-count-a');
+    }, 1);
+  } else if (room === '#roomB') {
+    fetchSensor('pir', from, function(json) {
+      updatePIR(json, chartPIR_B, '#latest-measured-pir-b', '#latest-count-b');
+    }, 2);
+  } else if (room === '#roomMix') {
+    fetchSensor('thp', from, updateMixTHP);
+    fetchSensor('pir', from, function(json) { updateMixPIR(json, 'A'); }, 1);
+    fetchSensor('pir', from, function(json) { updateMixPIR(json, 'B'); }, 2);
+  }
+}
+
 function updateTimeAndFetch(newMoment) {
   // 日時ピッカーを更新
   $('#datetimepicker-common').datetimepicker('date', newMoment);
 
   // データを取得
   const from = formatForAjaxMoment(newMoment);
-  const activeTab = $('.nav-tabs .active').attr('href') || '#thp';
-
-  if (activeTab === '#thp') {
-    fetchSensor('thp', from, updateTHP);
-  } else {
-    fetchSensor('pir', from, updatePIR);
-  }
+  const activeTab = $('.nav-tabs .active').attr('href') || '#roomA';
+  fetchRoomData(from, activeTab);
 }
 
 // 時間操作のヘルパー関数
@@ -643,9 +774,21 @@ $(function(){
   $('#chart-thp').append(thpCanvas);
   chartTHP = createTHPChart(thpCanvas.getContext('2d'));
 
-  const pirCanvas = document.createElement('canvas');
-  $('#chart-pir').append(pirCanvas);
-  chartPIR = createPIRChart(pirCanvas.getContext('2d'));
+  const pirCanvasA = document.createElement('canvas');
+  $('#chart-pir-a').append(pirCanvasA);
+  chartPIR_A = createPIRChart(pirCanvasA.getContext('2d'));
+
+  const pirCanvasB = document.createElement('canvas');
+  $('#chart-pir-b').append(pirCanvasB);
+  chartPIR_B = createPIRChart(pirCanvasB.getContext('2d'));
+
+  const mixThpCanvas = document.createElement('canvas');
+  $('#chart-mix-thp').append(mixThpCanvas);
+  chartMixTHP = createTHPChart(mixThpCanvas.getContext('2d'));
+
+  const mixPirCanvas = document.createElement('canvas');
+  $('#chart-mix-pir').append(mixPirCanvas);
+  chartMixPIR = createMixPIRChart(mixPirCanvas.getContext('2d'));
 
   // Tempus Dominus 初期化（共通ピッカー）
   $('#datetimepicker-common').datetimepicker({
@@ -665,28 +808,28 @@ $(function(){
   // ピッカー変更時（スクロール的に時間を変えるだけで取得が走る）
   $('#datetimepicker-common').on('change.datetimepicker', function(e){
     const from = formatForAjaxMoment(e.date || moment());
-    // 現在表示されているタブに応じて取得
-    const activeTab = $('.nav-tabs .active').attr('href') || '#thp';
-    if (activeTab === '#thp') {
-      fetchSensor('thp', from, updateTHP);
-    } else {
-      fetchSensor('pir', from, updatePIR);
-    }
+    const activeTab = $('.nav-tabs .active').attr('href') || '#roomA';
+    fetchRoomData(from, activeTab);
   });
 
   // 下部タブが切り替わったらそのタブに合わせて取得
   $('a[data-toggle="tab"]').on('shown.bs.tab', function (e) {
-    const target = $(e.target).attr('href'); // '#thp' or '#pir'
+    const target = $(e.target).attr('href'); // '#roomA' or '#roomB'
     const from = formatForAjaxMoment($('#datetimepicker-common').datetimepicker('date') || moment());
 
     // タブ状態を保存
     saveActiveTab(target);
 
-    if (target === '#thp') {
-      fetchSensor('thp', from, updateTHP);
-    } else if (target === '#pir') {
-      fetchSensor('pir', from, updatePIR);
-    }
+    fetchRoomData(from, target);
+  });
+
+  // 部屋Aサブタブ切替
+  $('#roomA-subtabs button').on('click', function() {
+    const subtab = $(this).data('subtab');
+    $('#roomA-subtabs button').removeClass('btn-primary active').addClass('btn-outline-primary');
+    $(this).removeClass('btn-outline-primary').addClass('btn-primary active');
+    $('#roomA-thp, #roomA-pir-a').hide();
+    $('#roomA-' + subtab).show();
   });
 
   // 時間ナビゲーションボタンのイベント
@@ -696,10 +839,10 @@ $(function(){
   $('#time-forward-10m').on('click', () => adjustTime(10, 'minutes'));
   $('#time-forward-1h').on('click', () => adjustTime(1, 'hour'));
 
-  // 初期ロード：現在時刻を基準に両方読み込む
+  // 初期ロード：アクティブタブの部屋データを読み込む
   const nowFrom = formatForAjaxMoment(moment());
-  fetchSensor('thp', nowFrom, updateTHP);
-  fetchSensor('pir', nowFrom, updatePIR);
+  const initialTab = $('.nav-tabs .active').attr('href') || '#roomA';
+  fetchRoomData(nowFrom, initialTab);
 });
 
 // タブ状態の保存・復元機能
@@ -718,23 +861,24 @@ function saveActiveTab(tabId) {
 }
 
 function restoreActiveTab() {
-  let activeTab = '#thp'; // デフォルト
+  let activeTab = '#roomA'; // デフォルト
+  const validTabs = ['#roomA', '#roomB', '#roomMix'];
 
   try {
     // URLハッシュから復元を試行
-    if (window.location.hash && ['#thp', '#pir'].includes(window.location.hash)) {
+    if (window.location.hash && validTabs.includes(window.location.hash)) {
       activeTab = window.location.hash;
     }
     // URLハッシュがない場合はsessionStorageから復元
     else if (typeof(Storage) !== "undefined") {
       const savedTab = sessionStorage.getItem('activeTab');
-      if (savedTab && ['#thp', '#pir'].includes(savedTab)) {
+      if (savedTab && validTabs.includes(savedTab)) {
         activeTab = savedTab;
       }
     }
 
     // タブを復元
-    if (activeTab !== '#thp') {
+    if (activeTab !== '#roomA') {
       // デフォルト以外の場合のみ切り替え
       $('.nav-tabs a[href="' + activeTab + '"]').tab('show');
     }
