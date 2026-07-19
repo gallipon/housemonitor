@@ -117,11 +117,6 @@ function validateInput($value, $type) {
                 'options' => ['min_range' => 1, 'max_range' => 10]
             ]);
             return $sensor_no !== false ? $sensor_no : 1;
-        case 'offset':
-            $offset = filter_var($value, FILTER_VALIDATE_INT, [
-                'options' => ['min_range' => 0, 'max_range' => 10000]
-            ]);
-            return $offset !== false ? $offset : 0;
         case 'datetime':
             if (empty($value)) return date("Y-m-d H:i:s");
             // 日時形式の検証
@@ -135,6 +130,17 @@ function validateInput($value, $type) {
                 }
             }
             return date("Y-m-d H:i:s");
+        case 'range_datetime':
+            // 範囲取得(from/to)用の厳格な日時検証。不正なら null を返す
+            // （'datetime' と異なり現在時刻へフォールバックしない）。
+            if (!is_string($value) || $value === '') {
+                return null;
+            }
+            if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $value)) {
+                return null;
+            }
+            $dt = DateTime::createFromFormat('Y-m-d H:i:s', $value);
+            return ($dt && $dt->format('Y-m-d H:i:s') === $value) ? $value : null;
         default:
             return null;
     }
@@ -144,8 +150,6 @@ function validateInput($value, $type) {
 if (isset($_GET['action'])) {
     // 入力値検証
     $action = validateInput($_GET['action'] ?? '', 'action');
-    $offset = validateInput($_GET['offset'] ?? 0, 'offset');
-    $from = validateInput(urldecode($_GET['from'] ?? ''), 'datetime');
 
     if (!$action) {
         http_response_code(400);
@@ -154,27 +158,83 @@ if (isset($_GET['action'])) {
         exit;
     }
 
+    // --- 取得モード判定 ---
+    // `to` が指定されていれば from/to の範囲取得モード（ドラッグで過去へ遡る遅延ロード用）。
+    // `to` が無ければ従来どおり基準時刻(from)から過去24時間ウィンドウ（後方互換）。
+    $range_mode = isset($_GET['to']) && $_GET['to'] !== '';
+    $range_from = null;
+    $range_to   = null;
+    $downsample = false;
+    $from       = null;
+
+    if ($range_mode) {
+        $range_from = validateInput(urldecode($_GET['from'] ?? ''), 'range_datetime');
+        $range_to   = validateInput(urldecode($_GET['to'] ?? ''), 'range_datetime');
+        // 片側のみ・書式不正・to<=from はいずれも 400
+        if ($range_from === null || $range_to === null
+            || strtotime($range_to) <= strtotime($range_from)) {
+            http_response_code(400);
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['error' => 'Invalid from/to range']);
+            exit;
+        }
+        // 窓長が2時間(7200秒)を超えるときはデータを間引く。
+        // THP(連続値)は5分平均、PIR(離散イベント)は生データのまま返す。
+        $downsample = (strtotime($range_to) - strtotime($range_from)) > 7200;
+    } else {
+        // 従来動作: 基準時刻。不正時は現在時刻へフォールバック。
+        $from = validateInput(urldecode($_GET['from'] ?? ''), 'datetime');
+    }
+
     try {
         if ($action === 'thp') {
-            $stmt = $mysqli->prepare("SELECT * FROM bme280 WHERE measured_at <= ? ORDER BY measured_at DESC LIMIT ?, 144");
-            $stmt->bind_param('si', $from, $offset);
+            if ($range_mode) {
+                if ($downsample) {
+                    // 5分バケット平均。派生テーブルで bucket 列を先に作り、
+                    // 外側で bucket により GROUP/SELECT する。SELECT と GROUP BY に
+                    // 同一の複合式を直接書くと MySQL8 の only_full_group_by が
+                    // 関数従属を認識せず Fatal error になるため、必ず派生テーブル方式にする。
+                    $stmt = $mysqli->prepare(
+                        "SELECT FROM_UNIXTIME(bucket * 300) AS measured_at,
+                                AVG(temperature) AS temperature,
+                                AVG(humidity)    AS humidity,
+                                AVG(pressure)    AS pressure
+                         FROM (
+                             SELECT FLOOR(UNIX_TIMESTAMP(measured_at) / 300) AS bucket,
+                                    temperature, humidity, pressure
+                             FROM bme280
+                             WHERE measured_at >= ? AND measured_at < ?
+                         ) t
+                         GROUP BY bucket
+                         ORDER BY bucket ASC"
+                    );
+                } else {
+                    $stmt = $mysqli->prepare(
+                        "SELECT measured_at, temperature, humidity, pressure
+                         FROM bme280
+                         WHERE measured_at >= ? AND measured_at < ?
+                         ORDER BY measured_at ASC"
+                    );
+                }
+                $stmt->bind_param('ss', $range_from, $range_to);
+            } else {
+                // 基準時刻から過去24時間の時間範囲で取得（件数固定だと行数差で表示期間がずれるため）
+                $stmt = $mysqli->prepare("SELECT * FROM bme280 WHERE measured_at <= ? AND measured_at > DATE_SUB(?, INTERVAL 24 HOUR) ORDER BY measured_at ASC");
+                $stmt->bind_param('ss', $from, $from);
+            }
             $stmt->execute();
             $result = $stmt->get_result();
 
+            // ダウンサンプル(平均)のときのみ小数丸め。生データ(従来動作含む)は精度を変えない。
+            $round = ($range_mode && $downsample);
             $temps = $humids = $pressures = $measures = [];
             while ($row = $result->fetch_assoc()) {
-                $temps[]     = (float)$row['temperature'];
-                $humids[]    = (float)$row['humidity'];
-                $pressures[] = (float)$row['pressure'];
+                $temps[]     = $round ? round((float)$row['temperature'], 2) : (float)$row['temperature'];
+                $humids[]    = $round ? round((float)$row['humidity'], 2)    : (float)$row['humidity'];
+                $pressures[] = $round ? round((float)$row['pressure'], 2)     : (float)$row['pressure'];
                 $measures[]  = htmlspecialchars($row['measured_at'], ENT_QUOTES, 'UTF-8');
             }
             $stmt->close();
-
-            // SQLはDESC（新しい順）で取っているため、古い→新しいに並べ替える
-            $temps = array_reverse($temps);
-            $humids = array_reverse($humids);
-            $pressures = array_reverse($pressures);
-            $measures = array_reverse($measures);
 
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(['temps'=>$temps,'humids'=>$humids,'pressures'=>$pressures,'measures'=>$measures]);
@@ -183,8 +243,16 @@ if (isset($_GET['action'])) {
 
         if ($action === 'pir') {
             $sensor_no = validateInput($_GET['sensor_no'] ?? 1, 'sensor_no');
-            $stmt = $mysqli->prepare("SELECT * FROM hc_sr501 WHERE sensor_no = ? AND measured_at <= ? ORDER BY measured_at DESC LIMIT ?, 144");
-            $stmt->bind_param('isi', $sensor_no, $from, $offset);
+            if ($range_mode) {
+                // PIRは離散イベントのため平均は不適切。範囲内の生データをそのまま返す。
+                // `count` は予約語のためバッククォートで囲む。
+                $stmt = $mysqli->prepare("SELECT `count`, measured_at FROM hc_sr501 WHERE sensor_no = ? AND measured_at >= ? AND measured_at < ? ORDER BY measured_at ASC");
+                $stmt->bind_param('iss', $sensor_no, $range_from, $range_to);
+            } else {
+                // 基準時刻から過去24時間の時間範囲で取得（件数固定だと行数差で表示期間がずれるため）
+                $stmt = $mysqli->prepare("SELECT * FROM hc_sr501 WHERE sensor_no = ? AND measured_at <= ? AND measured_at > DATE_SUB(?, INTERVAL 24 HOUR) ORDER BY measured_at ASC");
+                $stmt->bind_param('iss', $sensor_no, $from, $from);
+            }
             $stmt->execute();
             $result = $stmt->get_result();
 
@@ -194,9 +262,6 @@ if (isset($_GET['action'])) {
                 $measures[] = htmlspecialchars($row['measured_at'], ENT_QUOTES, 'UTF-8');
             }
             $stmt->close();
-
-            $counts = array_reverse($counts);
-            $measures = array_reverse($measures);
 
             header('Content-Type: application/json; charset=utf-8');
             echo json_encode(['counts'=>$counts,'measures'=>$measures]);
@@ -233,6 +298,11 @@ if (isset($_GET['action'])) {
   <script src="assets/ja.js"></script>
   <script src="assets/tempusdominus-bootstrap-4.min.js"></script>
   <script src="assets/Chart.bundle.min.js"></script>
+  <!-- pan/zoom + iPadピンチ用（Chart.js v2 系。既存 Chart.js の後に読み込む）
+       ※ 本プロジェクトの Chart.js は v2 系のため、v3/v4 専用の chartjs-plugin-zoom@2.x /
+         Chart.register() は使用不可。v2 互換の 0.7.7 を使う。plugin は読み込み時に自動登録される。 -->
+  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@0.7.7/dist/chartjs-plugin-zoom.min.js"></script>
 
   <style>
     body { padding-bottom: 80px; padding-top: 20px; }
@@ -433,105 +503,106 @@ const CHART_COMMON_OPTIONS = {
   responsive: true
 };
 
-function createTHPChart(canvas) {
+/* ---- pan/zoom 共通ヘルパー（Chart.js 2.7.3 + chartjs-plugin-zoom@0.7.7） ---- */
+// zoomKey を渡すと pan/zoom + 遅延ロードを有効化。x軸に ticks(空) を持たせて
+// zoomプラグインが書き込む ticks.min/max の参照先を安定させる。
+function makeTimeXAxis(zoomKey) {
+  const x = {
+    type: 'time',
+    distribution: 'linear',
+    time: { unit: 'hour', displayFormats: { hour: 'MM/DD HH:mm' } }
+  };
+  if (zoomKey) x.ticks = {};
+  return x;
+}
+
+// zoom プラグイン設定（options.plugins.zoom）。完了コールバックは引数形状に依存せず、
+// zoomKey で登録済みのローダーを registry から引いて起動する。
+function makeZoomPlugin(zoomKey) {
+  return {
+    zoom: {
+      pan: { enabled: true, mode: 'x', onPanComplete: () => triggerLazy(zoomKey) },
+      zoom: { enabled: true, mode: 'x', drag: false, speed: 0.1, onZoomComplete: () => triggerLazy(zoomKey) }
+    }
+  };
+}
+
+// zoomKey -> ローダー。チャート生成とローダー生成の順序に依存しないための遅延束縛。
+const lazyLoaders = {};
+function triggerLazy(key) {
+  const l = lazyLoaders[key];
+  if (l) l.onComplete();
+}
+
+function createTHPChart(canvas, zoomKey) {
+  const options = {
+    ...CHART_COMMON_OPTIONS,
+    scales: {
+      xAxes: [ makeTimeXAxis(zoomKey) ],
+      yAxes: [
+        { id: 'y1', position: 'left', ticks: { fontColor: 'rgba(220,40,20,0.8)' } },
+        { id: 'y2', position: 'right', ticks: { fontColor: 'rgba(60,90,220,0.8)' }, gridLines: { drawOnChartArea: false } },
+        { id: 'y3', position: 'right', ticks: { fontColor: 'rgba(60,240,20,0.8)' }, gridLines: { drawOnChartArea: false } }
+      ]
+    }
+  };
+  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+
   return new Chart(canvas, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        {
-          label: '温度',
-          data: [],
-          borderColor: 'rgba(220,40,20,0.8)',
-          backgroundColor: 'rgba(220,40,20,0.15)',
-          fill: false,
-          yAxisID: "y1"
-        },
-        {
-          label: '湿度',
-          data: [],
-          borderColor: 'rgba(60,90,220,0.8)',
-          backgroundColor: 'rgba(60,90,220,0.15)',
-          fill: false,
-          yAxisID: "y2"
-        },
-        {
-          label: '気圧',
-          data: [],
-          borderColor: 'rgba(60,240,20,0.8)',
-          backgroundColor: 'rgba(60,240,20,0.15)',
-          fill: false,
-          yAxisID: "y3"
-        }
+        { label: '温度', data: [], borderColor: 'rgba(220,40,20,0.8)', backgroundColor: 'rgba(220,40,20,0.15)', fill: false, yAxisID: "y1" },
+        { label: '湿度', data: [], borderColor: 'rgba(60,90,220,0.8)', backgroundColor: 'rgba(60,90,220,0.15)', fill: false, yAxisID: "y2" },
+        { label: '気圧', data: [], borderColor: 'rgba(60,240,20,0.8)', backgroundColor: 'rgba(60,240,20,0.15)', fill: false, yAxisID: "y3" }
       ]
     },
-    options: {
-      ...CHART_COMMON_OPTIONS,
-      scales: {
-        ...CHART_COMMON_OPTIONS.scales,
-        yAxes: [
-          { id: 'y1', position: 'left', ticks: { fontColor: 'rgba(220,40,20,0.8)' } },
-          { id: 'y2', position: 'right', ticks: { fontColor: 'rgba(60,90,220,0.8)' }, gridLines: { drawOnChartArea: false } },
-          { id: 'y3', position: 'right', ticks: { fontColor: 'rgba(60,240,20,0.8)' }, gridLines: { drawOnChartArea: false } }
-        ]
-      }
-    }
+    options: options
   });
 }
 
-function createPIRChart(canvas) {
+function createPIRChart(canvas, zoomKey) {
+  const options = {
+    ...CHART_COMMON_OPTIONS,
+    scales: {
+      xAxes: [ makeTimeXAxis(zoomKey) ],
+      yAxes: [{ ticks: { beginAtZero: true } }]
+    }
+  };
+  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+
   return new Chart(canvas, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        {
-          label: '人感',
-          data: [],
-          borderColor: 'rgba(240,180,20,0.9)',
-          backgroundColor: 'rgba(240,180,20,0.25)',
-          fill: false
-        }
+        { label: '人感', data: [], borderColor: 'rgba(240,180,20,0.9)', backgroundColor: 'rgba(240,180,20,0.25)', fill: false }
       ]
     },
-    options: {
-      ...CHART_COMMON_OPTIONS,
-      scales: {
-        ...CHART_COMMON_OPTIONS.scales,
-        yAxes: [{ ticks: { beginAtZero: true } }]
-      }
-    }
+    options: options
   });
 }
 
-function createMixPIRChart(canvas) {
+function createMixPIRChart(canvas, zoomKey) {
+  const options = {
+    ...CHART_COMMON_OPTIONS,
+    scales: {
+      xAxes: [ makeTimeXAxis(zoomKey) ],
+      yAxes: [{ ticks: { beginAtZero: true } }]
+    }
+  };
+  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+
   return new Chart(canvas, {
     type: 'line',
     data: {
       datasets: [
-        {
-          label: '部屋A',
-          data: [],
-          borderColor: 'rgba(240,180,20,0.9)',
-          backgroundColor: 'rgba(240,180,20,0.15)',
-          fill: false
-        },
-        {
-          label: '部屋B',
-          data: [],
-          borderColor: 'rgba(100,60,200,0.9)',
-          backgroundColor: 'rgba(100,60,200,0.15)',
-          fill: false
-        }
+        { label: '部屋A', data: [], borderColor: 'rgba(240,180,20,0.9)', backgroundColor: 'rgba(240,180,20,0.15)', fill: false },
+        { label: '部屋B', data: [], borderColor: 'rgba(100,60,200,0.9)', backgroundColor: 'rgba(100,60,200,0.15)', fill: false }
       ]
     },
-    options: {
-      ...CHART_COMMON_OPTIONS,
-      scales: {
-        ...CHART_COMMON_OPTIONS.scales,
-        yAxes: [{ ticks: { beginAtZero: true } }]
-      }
-    }
+    options: options
   });
 }
 
@@ -554,8 +625,7 @@ function fetchSensor(sensor, from, cb, sensorNo) {
 
   const params = {
     action: sensor,
-    from: encodeURIComponent(from),
-    offset: 0
+    from: encodeURIComponent(from)
   };
   if (sensor === 'pir' && sensorNo) {
     params.sensor_no = sensorNo;
@@ -610,16 +680,211 @@ function getChangeArrow(current, previous) {
   return '';
 }
 
-function updateTHP(json) {
-  if (!json) return;
+/* ---- pan/zoom + 過去への遅延ロード（汎用ファクトリ） ---- */
+// 各チャートは {t:Date, ...} 点列を系列ごとに内部保持し、パンで左端(過去)へ近づいたら
+// チャンクを追加取得して先頭に prepend する（tapo からの移植を全チャートに一般化）。
 
-  // チャートデータ更新
-  chartTHP.data.labels = json.measures;
-  chartTHP.data.datasets[0].data = json.temps;
-  chartTHP.data.datasets[1].data = json.humids;
-  chartTHP.data.datasets[2].data = json.pressures;
-  chartTHP.update();
+// JST文字列 "YYYY-MM-DD HH:MM:SS" -> Date（Safari対策で ' '→'T'）
+function parseJst(str) {
+  return new Date(str.replace(' ', 'T'));
+}
 
+// Date -> "YYYY-MM-DD HH:MM:SS"（ローカル=JST運用前提。parseJst の逆変換）
+function toJstParam(date) {
+  const p = (n) => String(n).padStart(2, '0');
+  return date.getFullYear() + '-' + p(date.getMonth() + 1) + '-' + p(date.getDate()) + ' ' +
+         p(date.getHours()) + ':' + p(date.getMinutes()) + ':' + p(date.getSeconds());
+}
+
+// 水平(x)スケールを取得（v2 の既定id 'x-axis-0'）。null安全＋フォールバック付き。
+function getXScale(chart) {
+  if (!chart || !chart.scales) return null;
+  for (const id in chart.scales) {
+    const s = chart.scales[id];
+    if (s && typeof s.isHorizontal === 'function' && s.isHorizontal()) return s;
+  }
+  return chart.scales['x-axis-0'] || null;
+}
+
+// 時間軸の表示ウィンドウを設定する。
+// Chart.js 2.7.3 の time スケールは determineDataLimits/buildTicks で
+// options.time.min / options.time.max のみを見て範囲を決める（ticks.min/max は無視）。
+// また chartjs-plugin-zoom@0.7.7 の panTimeScale は options.time.min/max が
+// 既に truthy のときだけパン結果を time.min/max へ書き戻す。よって window 制御は
+// 必ず time.min/max を主にする（ticks.min/max も一応揃えておく）。
+function setChartWindow(chart, minMs, maxMs) {
+  const xAxis = chart.options.scales.xAxes[0];
+  if (!xAxis.time) xAxis.time = {};
+  if (!xAxis.ticks) xAxis.ticks = {};
+  xAxis.time.min = minMs;
+  xAxis.time.max = maxMs;
+  xAxis.ticks.min = minMs;
+  xAxis.ticks.max = maxMs;
+}
+
+// 汎用の pan/zoom 遅延ローダー。1インスタンスが1チャート分の状態を保持する。
+// config:
+//   key        : registry用キー（zoomプラグインのコールバックから triggerLazy(key) で起動）
+//   tag        : ログ用ラベル
+//   getChart   : () => Chart（生成順に依存しないための遅延取得）
+//   windowMs   : 初期表示幅（既定24h）
+//   chunkMs    : 1回の取得チャンク（既定6h）
+//   maxSpanMs  : 1リクエストの上限スパン（既定3日）
+//   thresholdRatio : 可視左端が残りこの割合以内で追加ロード（既定0.2）
+//   render     : (chart, seriesPoints) => void  内部点列をデータセットへ描画
+//   fetchOlder : (fromStr, toStr, done) => void  done(arrays) を呼ぶ。
+//                arrays は系列ごとの配列（各要素: 点配列 or null=エラー）。
+function createLazyPanLoader(config) {
+  const windowMs = config.windowMs || 24 * 60 * 60 * 1000;
+  const chunkMs = config.chunkMs || 6 * 60 * 60 * 1000;
+  const maxSpanMs = config.maxSpanMs || 3 * 24 * 60 * 60 * 1000;
+  const thresholdRatio = config.thresholdRatio || 0.2;
+  const tag = config.tag || 'lazy';
+  const getChart = config.getChart;
+
+  let seriesPoints = [];   // 系列ごとの [{t:Date, ...}] 昇順
+  let oldest = null;       // ロード済み最古境界(ms)。要求済み境界であり実データ有無は問わない
+  let isLoading = false;
+  let reachedStart = false;
+  let timer = null;
+
+  function check() {
+    const chart = getChart();
+    if (!chart) return;
+    if (isLoading || reachedStart || oldest === null) return;
+    const xs = getXScale(chart);
+    if (!xs) return;
+    const span = xs.max - xs.min;
+    if (!(span > 0)) return;
+    const remaining = xs.min - oldest;
+    if (remaining <= span * thresholdRatio) loadOlder();
+  }
+
+  function loadOlder() {
+    const chart = getChart();
+    if (isLoading || reachedStart || oldest === null || !chart) return;
+    isLoading = true;
+
+    const toMs = oldest;
+    // 可視左端(さらに1チャンク分の余白付き)まで一度に取得し、速い/長いドラッグでも追いつく。
+    // ただし1リクエストは最大 maxSpanMs に制限し、足りない分は末尾で連続取得して埋める。
+    const xs = getXScale(chart);
+    const visibleMin = xs ? xs.min : toMs;
+    let fromMs = Math.min(toMs - chunkMs, visibleMin - chunkMs);
+    fromMs = Math.max(fromMs, toMs - maxSpanMs);
+    const fromStr = toJstParam(new Date(fromMs));
+    const toStr = toJstParam(new Date(toMs));
+
+    config.fetchOlder(fromStr, toStr, function(arrays) {
+      if (!arrays) { isLoading = false; return; }
+
+      let gotAny = false;    // いずれかの系列が1点以上返した
+      arrays.forEach(function(newPts, i) {
+        if (newPts === null || !newPts.length) return; // null=エラー / []=有効な空
+        gotAny = true;
+        const existing = seriesPoints[i] || [];
+        // 既存最古より前の点だけを採用して重複を除外し、先頭に prepend（昇順維持）
+        const oldestExisting = existing.length ? existing[0].t.getTime() : Infinity;
+        const dedup = newPts.filter(p => p.t.getTime() < oldestExisting);
+        seriesPoints[i] = dedup.concat(existing);
+      });
+
+      // 全系列が「有効な空(=null無し)」のときのみ、これ以上過去が無いと確定。
+      const anyError = arrays.some(a => a === null);
+      if (gotAny) {
+        oldest = fromMs;
+      } else if (!anyError) {
+        reachedStart = true;
+      }
+      // エラーのみ(進捗も確定も無し)のときは oldest 据え置き＆reachedStart据え置き→次のパンで再試行。
+
+      // 現在の表示範囲(パン/ズーム位置)を保ったままデータだけ差し替える。
+      const xs2 = getXScale(chart);
+      const curMin = xs2 ? xs2.min : null;
+      const curMax = xs2 ? xs2.max : null;
+      config.render(chart, seriesPoints);
+      if (curMin !== null) setChartWindow(chart, curMin, curMax);
+      chart.update(0); // v2.7.3 のアニメ無し即時再描画。'none' は v3+ 用でNaN化して描画されない
+      isLoading = false;
+
+      // 進捗があり、まだ埋めきれていない場合のみ連続取得（oldest が過去へ進むので自然停止）。
+      // エラー時は据え置きのため連鎖せず、無限リトライを防ぐ。
+      if (gotAny && !reachedStart) check();
+    });
+  }
+
+  const api = {
+    // 基準ロード: 表示範囲を [from-windowMs, from] に固定し状態を初期化する。
+    base: function(fromStr, initialSeriesPoints) {
+      const chart = getChart();
+      if (!chart) return;
+      const end = parseJst(fromStr).getTime();
+      const start = end - windowMs;
+      seriesPoints = initialSeriesPoints.map(a => (a ? a.slice() : []));
+      oldest = start;
+      reachedStart = false;
+      isLoading = false;
+      // 次のパンで新しい基準窓を「元の範囲」として記憶させる（resetZoom の戻り先を更新）
+      if (chart.$zoom) chart.$zoom._originalOptions = {};
+      config.render(chart, seriesPoints);
+      setChartWindow(chart, start, end);
+      chart.update();
+    },
+    // pan/zoom 完了時に呼ぶ（連続発火するので軽くデバウンス）
+    onComplete: function() {
+      clearTimeout(timer);
+      timer = setTimeout(check, 150);
+    },
+    check: check
+  };
+  if (config.key) lazyLoaders[config.key] = api;
+  return api;
+}
+
+/* ---- JSON -> 点列 変換 ---- */
+function thpPointsFromJson(json) {
+  return json.measures.map((m, i) => ({ t: parseJst(m), temp: json.temps[i], humid: json.humids[i], press: json.pressures[i] }));
+}
+function pirPointsFromJson(json) {
+  return json.measures.map((m, i) => ({ t: parseJst(m), count: json.counts[i] }));
+}
+
+/* ---- 点列 -> データセット 描画 ---- */
+function renderTHP3(chart, sp) {
+  const pts = sp[0] || [];
+  chart.data.labels = [];
+  chart.data.datasets[0].data = pts.map(p => ({ x: p.t, y: p.temp }));
+  chart.data.datasets[1].data = pts.map(p => ({ x: p.t, y: p.humid }));
+  chart.data.datasets[2].data = pts.map(p => ({ x: p.t, y: p.press }));
+}
+function renderPIR1(chart, sp) {
+  const pts = sp[0] || [];
+  chart.data.labels = [];
+  chart.data.datasets[0].data = pts.map(p => ({ x: p.t, y: p.count }));
+}
+function renderMixPIR2(chart, sp) {
+  chart.data.labels = [];
+  chart.data.datasets[0].data = (sp[0] || []).map(p => ({ x: p.t, y: p.count }));
+  chart.data.datasets[1].data = (sp[1] || []).map(p => ({ x: p.t, y: p.count }));
+}
+
+/* ---- 範囲取得（遅延ロード用）。点配列 or null(エラー) を cb で返す ---- */
+function fetchThpRange(fromStr, toStr, cb) {
+  $.getJSON(scriptName, { action: 'thp', from: encodeURIComponent(fromStr), to: encodeURIComponent(toStr) }, function(json) {
+    if (!json || !Array.isArray(json.measures) || !Array.isArray(json.temps) ||
+        !Array.isArray(json.humids) || !Array.isArray(json.pressures)) { cb(null); return; }
+    cb(thpPointsFromJson(json));
+  }).fail(function() { cb(null); });
+}
+function fetchPirRange(sensorNo, fromStr, toStr, cb) {
+  $.getJSON(scriptName, { action: 'pir', sensor_no: sensorNo, from: encodeURIComponent(fromStr), to: encodeURIComponent(toStr) }, function(json) {
+    if (!json || !Array.isArray(json.measures) || !Array.isArray(json.counts)) { cb(null); return; }
+    cb(pirPointsFromJson(json));
+  }).fail(function() { cb(null); });
+}
+
+// 最新値ラベルの更新（json 配列の末尾が最新）
+function updateTHPLatest(json) {
   if (json.measures.length === 0) {
     $('#latest-measured-thp').text('');
     $('#latest-temp').text('温度 : -');
@@ -627,47 +892,93 @@ function updateTHP(json) {
     $('#latest-press').text('気圧 : -');
     return;
   }
-
-  // 最新は配列の末尾（古い→新しい順なので末尾が最新）
   const last = json.measures.length - 1;
   const prev = Math.max(0, last - 1);
-
-  const current = {
-    temp: json.temps[last],
-    humid: json.humids[last],
-    pressure: json.pressures[last]
-  };
-
-  const previous = {
-    temp: json.temps[prev],
-    humid: json.humids[prev],
-    pressure: json.pressures[prev]
-  };
-
-  // UI更新
   $('#latest-measured-thp').text(formatTimeDisplay(json.measures[last]));
-  $('#latest-temp').text(`温度 : ${current.temp}${getChangeArrow(current.temp, previous.temp)}`);
-  $('#latest-humid').text(`湿度 : ${current.humid}${getChangeArrow(current.humid, previous.humid)}`);
-  $('#latest-press').text(`気圧 : ${current.pressure}${getChangeArrow(current.pressure, previous.pressure)}`);
+  $('#latest-temp').text(`温度 : ${json.temps[last]}${getChangeArrow(json.temps[last], json.temps[prev])}`);
+  $('#latest-humid').text(`湿度 : ${json.humids[last]}${getChangeArrow(json.humids[last], json.humids[prev])}`);
+  $('#latest-press').text(`気圧 : ${json.pressures[last]}${getChangeArrow(json.pressures[last], json.pressures[prev])}`);
 }
 
-function updatePIR(json, chart, elMeasured, elCount) {
-  if (!json) return;
+/* ---- 遅延ローダー・インスタンス（チャートは init で生成、getChart で遅延取得） ---- */
+const thpLoader = createLazyPanLoader({
+  key: 'roomA-thp', tag: 'roomA-thp', getChart: () => chartTHP,
+  render: renderTHP3,
+  fetchOlder: (f, t, done) => fetchThpRange(f, t, pts => done([pts]))
+});
+const pirALoader = createLazyPanLoader({
+  key: 'roomA-pir', tag: 'roomA-pir', getChart: () => chartPIR_A,
+  render: renderPIR1,
+  fetchOlder: (f, t, done) => fetchPirRange(1, f, t, pts => done([pts]))
+});
+const pirBLoader = createLazyPanLoader({
+  key: 'roomB-pir', tag: 'roomB-pir', getChart: () => chartPIR_B,
+  render: renderPIR1,
+  fetchOlder: (f, t, done) => fetchPirRange(2, f, t, pts => done([pts]))
+});
+const mixThpLoader = createLazyPanLoader({
+  key: 'mix-thp', tag: 'mix-thp', getChart: () => chartMixTHP,
+  render: renderTHP3,
+  fetchOlder: (f, t, done) => fetchThpRange(f, t, pts => done([pts]))
+});
+// Mix PIR は2系列（A=sensor1, B=sensor2）。1回のパンで両方の過去を取得し、
+// それぞれ datasets[0]/[1] に prepend。両方が空になったときだけ reachedStart。
+const mixPirLoader = createLazyPanLoader({
+  key: 'mix-pir', tag: 'mix-pir', getChart: () => chartMixPIR,
+  render: renderMixPIR2,
+  fetchOlder: (f, t, done) => {
+    let a, b, n = 0;
+    const fin = () => { if (n === 2) done([a, b]); };
+    fetchPirRange(1, f, t, pts => { a = pts; n++; fin(); });
+    fetchPirRange(2, f, t, pts => { b = pts; n++; fin(); });
+  }
+});
 
-  // チャートデータ更新
-  chart.data.labels = json.measures;
-  chart.data.datasets[0].data = json.counts;
-  chart.update();
+/* ---- 基準ロード（ピッカー/時間ナビ/タブ切替から呼ばれる初期表示） ---- */
+function loadTHPBase(from) {
+  fetchSensor('thp', from, function(json) {
+    if (!json) return;
+    thpLoader.base(from, [ thpPointsFromJson(json) ]);
+    updateTHPLatest(json);
+  });
+}
 
+function loadPIRBase(from, sensorNo, loader, elMeasured, elCount) {
+  fetchSensor('pir', from, function(json) {
+    if (!json) return;
+    loader.base(from, [ pirPointsFromJson(json) ]);
+    updatePIRLatest(json, elMeasured, elCount);
+  }, sensorNo);
+}
+
+function loadMixTHPBase(from) {
+  fetchSensor('thp', from, function(json) {
+    if (!json) return;
+    mixThpLoader.base(from, [ thpPointsFromJson(json) ]);
+    updateMixTHPLatest(json);
+  });
+}
+
+function loadMixPIRBase(from) {
+  let a = null, b = null, n = 0;
+  function fin() {
+    if (n < 2) return;
+    mixPirLoader.base(from, [ a ? a.pts : [], b ? b.pts : [] ]);
+    updateMixPIRLatest(a ? a.json : null, 'A');
+    updateMixPIRLatest(b ? b.json : null, 'B');
+  }
+  fetchSensor('pir', from, function(json) { if (json) a = { json, pts: pirPointsFromJson(json) }; n++; fin(); }, 1);
+  fetchSensor('pir', from, function(json) { if (json) b = { json, pts: pirPointsFromJson(json) }; n++; fin(); }, 2);
+}
+
+/* ---- 最新値ラベル更新（基準ロードの JSON から算出） ---- */
+function updatePIRLatest(json, elMeasured, elCount) {
   if (json.measures.length === 0) {
     $(elMeasured).text('');
     $(elCount).text('カウント : -');
     return;
   }
-
-  // 直近で0以上だった時間と回数を検索
   const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
-
   if (latestDetection) {
     $(elMeasured).text(formatTimeDisplay(latestDetection.time));
     $(elCount).text(`カウント : ${latestDetection.count}`);
@@ -677,14 +988,19 @@ function updatePIR(json, chart, elMeasured, elCount) {
   }
 }
 
-function updateMixTHP(json) {
-  if (!json) return;
-  chartMixTHP.data.labels = json.measures;
-  chartMixTHP.data.datasets[0].data = json.temps;
-  chartMixTHP.data.datasets[1].data = json.humids;
-  chartMixTHP.data.datasets[2].data = json.pressures;
-  chartMixTHP.update();
+function updateMixPIRLatest(json, room) {
+  const elId = (room === 'A') ? '#mix-latest-a' : '#mix-latest-b';
+  const label = (room === 'A') ? '部屋A' : '部屋B';
+  if (!json) { $(elId).text(`${label} : 検出なし`); return; }
+  const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
+  if (latestDetection) {
+    $(elId).text(`${label} : ${formatTimeDisplay(latestDetection.time)} (${latestDetection.count}回)`);
+  } else {
+    $(elId).text(`${label} : 検出なし`);
+  }
+}
 
+function updateMixTHPLatest(json) {
   if (json.measures.length === 0) {
     $('#mix-latest-temp').text('温度 : -');
     $('#mix-latest-humid').text('湿度 : -');
@@ -697,23 +1013,6 @@ function updateMixTHP(json) {
   $('#mix-latest-temp').text(`温度 : ${json.temps[last]}${getChangeArrow(json.temps[last], json.temps[prev])}`);
   $('#mix-latest-humid').text(`湿度 : ${json.humids[last]}${getChangeArrow(json.humids[last], json.humids[prev])}`);
   $('#mix-latest-press').text(`気圧 : ${json.pressures[last]}${getChangeArrow(json.pressures[last], json.pressures[prev])}`);
-}
-
-function updateMixPIR(json, room) {
-  if (!json) return;
-  const dsIdx = (room === 'A') ? 0 : 1;
-  // {x, y}形式で渡すことで両センサーが独立したタイムスタンプを持てる
-  chartMixPIR.data.datasets[dsIdx].data = json.measures.map((t, i) => ({ x: t, y: json.counts[i] }));
-  chartMixPIR.update();
-
-  const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
-  const elId = (room === 'A') ? '#mix-latest-a' : '#mix-latest-b';
-  const label = (room === 'A') ? '部屋A' : '部屋B';
-  if (latestDetection) {
-    $(elId).text(`${label} : ${formatTimeDisplay(latestDetection.time)} (${latestDetection.count}回)`);
-  } else {
-    $(elId).text(`${label} : 検出なし`);
-  }
 }
 
 // PIRセンサーの最新検出を見つけるヘルパー関数
@@ -736,18 +1035,13 @@ function formatForAjaxMoment(m) {
 
 function fetchRoomData(from, room) {
   if (room === '#roomA') {
-    fetchSensor('thp', from, updateTHP);
-    fetchSensor('pir', from, function(json) {
-      updatePIR(json, chartPIR_A, '#latest-measured-pir-a', '#latest-count-a');
-    }, 1);
+    loadTHPBase(from);
+    loadPIRBase(from, 1, pirALoader, '#latest-measured-pir-a', '#latest-count-a');
   } else if (room === '#roomB') {
-    fetchSensor('pir', from, function(json) {
-      updatePIR(json, chartPIR_B, '#latest-measured-pir-b', '#latest-count-b');
-    }, 2);
+    loadPIRBase(from, 2, pirBLoader, '#latest-measured-pir-b', '#latest-count-b');
   } else if (room === '#roomMix') {
-    fetchSensor('thp', from, updateMixTHP);
-    fetchSensor('pir', from, function(json) { updateMixPIR(json, 'A'); }, 1);
-    fetchSensor('pir', from, function(json) { updateMixPIR(json, 'B'); }, 2);
+    loadMixTHPBase(from);
+    loadMixPIRBase(from);
   }
 }
 
@@ -770,25 +1064,38 @@ function adjustTime(amount, unit) {
 /* ---- 初期化 / イベント ---- */
 $(function(){
   // canvas作成とChart生成
+  // ダブルクリックでズーム/パンをリセットし、直近の24時間プリセット表示に戻す
+  const addDblClickReset = (canvas, getChart) => {
+    canvas.addEventListener('dblclick', () => {
+      const c = getChart();
+      if (c && c.resetZoom) c.resetZoom();
+    });
+  };
+
   const thpCanvas = document.createElement('canvas');
   $('#chart-thp').append(thpCanvas);
-  chartTHP = createTHPChart(thpCanvas.getContext('2d'));
+  chartTHP = createTHPChart(thpCanvas.getContext('2d'), 'roomA-thp'); // pan/zoom + 遅延ロード有効
+  addDblClickReset(thpCanvas, () => chartTHP);
 
   const pirCanvasA = document.createElement('canvas');
   $('#chart-pir-a').append(pirCanvasA);
-  chartPIR_A = createPIRChart(pirCanvasA.getContext('2d'));
+  chartPIR_A = createPIRChart(pirCanvasA.getContext('2d'), 'roomA-pir');
+  addDblClickReset(pirCanvasA, () => chartPIR_A);
 
   const pirCanvasB = document.createElement('canvas');
   $('#chart-pir-b').append(pirCanvasB);
-  chartPIR_B = createPIRChart(pirCanvasB.getContext('2d'));
+  chartPIR_B = createPIRChart(pirCanvasB.getContext('2d'), 'roomB-pir');
+  addDblClickReset(pirCanvasB, () => chartPIR_B);
 
   const mixThpCanvas = document.createElement('canvas');
   $('#chart-mix-thp').append(mixThpCanvas);
-  chartMixTHP = createTHPChart(mixThpCanvas.getContext('2d'));
+  chartMixTHP = createTHPChart(mixThpCanvas.getContext('2d'), 'mix-thp');
+  addDblClickReset(mixThpCanvas, () => chartMixTHP);
 
   const mixPirCanvas = document.createElement('canvas');
   $('#chart-mix-pir').append(mixPirCanvas);
-  chartMixPIR = createMixPIRChart(mixPirCanvas.getContext('2d'));
+  chartMixPIR = createMixPIRChart(mixPirCanvas.getContext('2d'), 'mix-pir');
+  addDblClickReset(mixPirCanvas, () => chartMixPIR);
 
   // Tempus Dominus 初期化（共通ピッカー）
   $('#datetimepicker-common').datetimepicker({
