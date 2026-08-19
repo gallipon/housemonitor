@@ -47,8 +47,20 @@ python pir3.py         # PIR 検知カウントの送信
 
 ### サーバー側
 
-1. `server/` を PHP 実行環境に配置し、MySQL にテーブルを作成
-2. `server/.env.example` を参考に、Web サーバーの環境変数（`SetEnv` / `fastcgi_param`）で DB 接続情報・API キー・ダッシュボードパスワードを設定
+1. `server/` を PHP 実行環境に配置
+
+2. MySQL にテーブルを作成
+
+   ```bash
+   mysql -u <user> -p <dbname> < server/sql/schema.sql             # センサーデータ用（必須）
+   mysql -u <user> -p <dbname> < server/sql/setup_remember_me.sql  # ログイン保持を使う場合
+   ```
+
+   既に稼働中のDBで `measured_at` のインデックスが無い場合は、`server/sql/add_indexes.sql` を適用すると範囲検索が大幅に速くなります。
+
+3. `server/.env.example` を参考に、Web サーバーの環境変数（`SetEnv` / `fastcgi_param`）で DB 接続情報・API キー・ダッシュボードパスワードを設定
+
+   > 環境変数はバーチャルホスト単位で有効です。同じドキュメントルートを複数のドメインで配信している場合は、**各バーチャルホストに設定してください**。
 
 ## 開発について
 
