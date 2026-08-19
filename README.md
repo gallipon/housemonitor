@@ -41,8 +41,16 @@
 cd raspi
 pip install -r requirements.txt
 cp .env.example .env   # API URL・API キーを設定
-python bme_280_raw.py  # 温湿度・気圧の送信
+python bme_280_raw.py  # 温湿度・気圧の送信（1回実行して疎通確認）
 python pir3.py         # PIR 検知カウントの送信
+```
+
+各スクリプトは **1 回実行につき 1 回計測・送信** して終了します。継続的に記録するには cron などで定期実行してください。
+
+```cron
+# 10 分ごとに計測（.env を読ませるため、スクリプトをラップするか WorkingDirectory を合わせる）
+0,10,20,30,40,50 * * * * cd /path/to/raspi && /usr/bin/python3 bme_280_raw.py
+0,10,20,30,40,50 * * * * cd /path/to/raspi && /usr/bin/python3 pir3.py
 ```
 
 ### サーバー側
@@ -61,6 +69,23 @@ python pir3.py         # PIR 検知カウントの送信
 3. `server/.env.example` を参考に、Web サーバーの環境変数（`SetEnv` / `fastcgi_param`）で DB 接続情報・API キー・ダッシュボードパスワードを設定
 
    > 環境変数はバーチャルホスト単位で有効です。同じドキュメントルートを複数のドメインで配信している場合は、**各バーチャルホストに設定してください**。
+
+### センサー死活監視（任意）
+
+`server/check_sensors.php` は、センサーからのデータが一定時間途絶えたときに [ntfy.sh](https://ntfy.sh/) 経由でスマートフォンへ通知します。cron で定期実行してください。
+
+```cron
+# CLI 実行では Web サーバーの SetEnv が効かないため、cron 側で環境変数を定義する
+DB_HOST=localhost
+DB_USER=your_db_user
+DB_PASS=your_db_password
+DB_NAME=your_db_name
+HOUSEMONITOR_NTFY_TOPIC=your_ntfy_topic_name
+
+*/5 * * * * /usr/bin/php /var/www/html/check_sensors.php >> /var/log/housemonitor_check.log 2>&1
+```
+
+`HOUSEMONITOR_NTFY_TOPIC` は通知の宛先を兼ねる秘密情報です。推測されにくい文字列を設定してください。
 
 ## 開発について
 

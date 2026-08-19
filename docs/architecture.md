@@ -17,7 +17,14 @@ housemonitor/
 │   ├── api/
 │   │   ├── bme280.php      ← BME280データ受信API（API Key認証付き）
 │   │   └── pir.php         ← PIRデータ受信API（API Key認証付き）
+│   ├── sql/
+│   │   ├── schema.sql              ← センサーデータ用テーブル（必須）
+│   │   ├── setup_remember_me.sql   ← ログイン保持用テーブル
+│   │   └── add_indexes.sql         ← 既存DBへのインデックス追加（移行用）
+│   ├── assets/             ← フロントエンドのライブラリ一式（同梱。README.md にバージョン記載）
+│   ├── check_sensors.php   ← センサー死活監視（cron実行、ntfy.sh通知）
 │   ├── login.php           ← ダッシュボードログインページ
+│   ├── logout.php          ← ログアウト処理
 │   └── dashboard.php       ← ダッシュボード（セッション認証付き）
 └── docs/
     └── architecture.md     ← 構成・データフロー・技術スタック
@@ -109,13 +116,32 @@ python-dotenv で `.env` ファイルから読み込み、デフォルト値付�
 ### server/dashboard.php（ダッシュボード・認証付き）
 - セッション認証チェック、未ログインなら login.php にリダイレクト
 - HTTPS強制、セキュリティヘッダー、CSRF対策、入力バリデーション
-- GETパラメータ: action=thp|pir, offset(ページング), from(日時)
-- プリペアドステートメントで144件取得（12時間分/5分間隔想定）
-- フロントエンド: Bootstrap 4, Chart.js, Moment.js, jQuery, Tempus Dominus
-- タブ切替（THP / PIR）、時間ナビゲーション（±1時間, ±10分, Now）
-- 最新値表示（上下矢印でトレンド表示）
+- GETパラメータ: `action=thp|pir`, `sensor_no`, `from`（基準日時）, `to`（範囲取得時）
+  - `to` 省略時は `from` から過去24時間を返す（既定動作）
+  - `from`/`to` 指定時はその範囲を返す。窓が2時間を超える場合、THPは5分平均にダウンサンプルする
+    （派生テーブルで bucket を作ってから集計する。SELECT と GROUP BY に同じ複合式を直接書くと
+    MySQL 8 の only_full_group_by で失敗するため）
+- データ参照元は環境変数 `HOUSEMONITOR_BME280_TABLE` で差し替え可能（既定 `bme280`）。
+  センサー個体のドリフト補正ビュー等を使う場合に指定する
+- 部屋別タブ（部屋A/部屋B/まとめ）、時間ナビゲーション、最新値表示（上下矢印でトレンド）
+- **グラフのドラッグ操作**: pan/zoom と、過去への遅延ロード（6時間チャンクを先頭に prepend）。
+  `createLazyPanLoader` ファクトリで全5チャートに適用
+- フロントエンド: Bootstrap 4, Chart.js **2.7.3**, Moment.js, jQuery, Tempus Dominus,
+  chartjs-plugin-zoom 0.7.7 + hammerjs（CDN）
+
+> **Chart.js は 2.7.3 固定。** pan/zoom の実装が v2 系 API（`time.min/max` による範囲制御、
+> `update(0)` による再描画）に依存しているため、v3 以降へ上げると動作しない。
+> 詳細は `server/assets/README.md` を参照。
+
+### server/check_sensors.php（センサー死活監視）
+- 各センサーの最終受信からの経過時間を `TIMESTAMPDIFF(MINUTE, MAX(measured_at), NOW())` で判定
+  （PHP と MySQL でタイムゾーンがずれると誤検知するため、MySQL 側で差分を計算する）
+- 閾値を超えたら ntfy.sh 経由でスマートフォンへ通知
+- cron から CLI 実行する。Web サーバーの `SetEnv` は CLI に効かないため、
+  DB接続情報と `HOUSEMONITOR_NTFY_TOPIC` は crontab 側で定義する
 
 ## 技術スタック
 
 - **センサー側**: Python 3 / smbus2 / RPi.GPIO / urllib / retry / python-dotenv
-- **サーバー側**: PHP 7+ / MySQL (mysqli) / Bootstrap 4 / Chart.js / Moment.js / jQuery / Font Awesome 4.7
+- **サーバー側**: PHP 7+ / MySQL 8 (mysqli) / Bootstrap 4.2.1 / Chart.js 2.7.3 / Moment.js / jQuery 3.2.1 / Tempus Dominus 5.0.1 / Font Awesome 4.7
+- **通知**: ntfy.sh（センサー死活監視）
