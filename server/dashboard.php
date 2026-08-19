@@ -146,6 +146,16 @@ function validateInput($value, $type) {
     }
 }
 
+// BME280 データの参照元。既定は bme280 テーブル。
+// センサー個体のドリフト補正ビュー等に差し替えたい場合は環境変数で指定する。
+//   例) SetEnv HOUSEMONITOR_BME280_TABLE bme280_corrected
+// 値はサーバー設定由来だが、識別子として使うため念のため書式を検証する。
+$bme_source = getenv('HOUSEMONITOR_BME280_TABLE') ?: 'bme280';
+if (!preg_match('/^[A-Za-z0-9_]+$/', $bme_source)) {
+    $bme_source = 'bme280';
+}
+$bme_is_adjusted = ($bme_source !== 'bme280');
+
 // ===== Ajax API 部分（セキュリティ強化） =====
 if (isset($_GET['action'])) {
     // 入力値検証
@@ -202,7 +212,7 @@ if (isset($_GET['action'])) {
                          FROM (
                              SELECT FLOOR(UNIX_TIMESTAMP(measured_at) / 300) AS bucket,
                                     temperature, humidity, pressure
-                             FROM bme280
+                             FROM {$bme_source}
                              WHERE measured_at >= ? AND measured_at < ?
                          ) t
                          GROUP BY bucket
@@ -211,7 +221,7 @@ if (isset($_GET['action'])) {
                 } else {
                     $stmt = $mysqli->prepare(
                         "SELECT measured_at, temperature, humidity, pressure
-                         FROM bme280
+                         FROM {$bme_source}
                          WHERE measured_at >= ? AND measured_at < ?
                          ORDER BY measured_at ASC"
                     );
@@ -219,7 +229,7 @@ if (isset($_GET['action'])) {
                 $stmt->bind_param('ss', $range_from, $range_to);
             } else {
                 // 基準時刻から過去24時間の時間範囲で取得（件数固定だと行数差で表示期間がずれるため）
-                $stmt = $mysqli->prepare("SELECT * FROM bme280 WHERE measured_at <= ? AND measured_at > DATE_SUB(?, INTERVAL 24 HOUR) ORDER BY measured_at ASC");
+                $stmt = $mysqli->prepare("SELECT * FROM {$bme_source} WHERE measured_at <= ? AND measured_at > DATE_SUB(?, INTERVAL 24 HOUR) ORDER BY measured_at ASC");
                 $stmt->bind_param('ss', $from, $from);
             }
             $stmt->execute();
@@ -346,6 +356,11 @@ if (isset($_GET['action'])) {
       </div>
       <div id="roomA-thp">
         <div id="chart-thp"></div>
+<?php if ($bme_is_adjusted): ?>
+        <p class="text-muted small mt-1 mb-0" title="環境変数 HOUSEMONITOR_BME280_TABLE で補正済みデータ元が指定されています。">
+          ※ 湿度はセンサー補正を適用した推定値です（生値ではありません）
+        </p>
+<?php endif; ?>
         <div class="row latest-values text-white mt-2">
           <p class="col-sm-3 p-1 bg-info text-center" id="latest-measured-thp"></p>
           <p class="col-sm-3 p-1 bg-danger text-center" id="latest-temp"></p>
