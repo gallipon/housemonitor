@@ -307,12 +307,15 @@ if (isset($_GET['action'])) {
   <script src="assets/bootstrap.min.js"></script>
   <script src="assets/ja.js"></script>
   <script src="assets/tempusdominus-bootstrap-4.min.js"></script>
-  <script src="assets/Chart.bundle.min.js"></script>
-  <!-- pan/zoom + iPadピンチ用（Chart.js v2 系。既存 Chart.js の後に読み込む）
-       ※ 本プロジェクトの Chart.js は v2 系のため、v3/v4 専用の chartjs-plugin-zoom@2.x /
-         Chart.register() は使用不可。v2 互換の 0.7.7 を使う。plugin は読み込み時に自動登録される。 -->
-  <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@0.7.7/dist/chartjs-plugin-zoom.min.js"></script>
+  <!-- Chart.js v4（UMD）。v4 は moment を同梱しないので時間軸アダプタを別途読み込む。
+       moment 自体は Tempus Dominus が既に必要としているため追加コストは実質ゼロ。
+       アダプタは window.moment と window.Chart の両方を参照するので、この順序を崩さないこと。 -->
+  <script src="assets/chart.umd.min.js"></script>
+  <script src="assets/chartjs-adapter-moment.min.js"></script>
+  <!-- pan/zoom + iPadピンチ用。plugin は window.Chart / window.Hammer / Chart.helpers を
+       参照し、読み込み時に Chart.register() で自動登録されるので明示登録は不要。 -->
+  <script src="assets/hammer.min.js"></script>
+  <script src="assets/chartjs-plugin-zoom.min.js"></script>
 
   <style>
     body { padding-bottom: 80px; padding-top: 20px; }
@@ -502,42 +505,66 @@ let chartMixTHP = null;
 let chartMixPIR = null;
 
 // チャート設定の共通オプション
+// animation: false は必須。plugin 0.7.7 はズーム時に chart.update(0)（アニメ無し）を
+// 呼んでいたが、plugin 2.x は chart.update('zoom') を呼ぶため animation.duration を継承し、
+// ズーム中に全点が250msかけて横に滑るようになる。その最中に遅延ロードで点が増減すると
+// 描画が乱れることがある。
+// なお公式ドキュメントの transitions.zoom.animation.duration = 0 と animations.x = false は
+// この組み合わせでは効かず（実測でズーム時も246msのアニメーションが残った）、
+// animation: false だけが確実に無効化できた。副作用としてデータ読み込み時の演出も消える。
 const CHART_COMMON_OPTIONS = {
-  animation: { duration: 250 },
+  animation: false,
   scales: {
-    xAxes: [{
+    x: {
       type: 'time',
-      distribution: 'linear',
       time: {
         unit: 'hour',
-        displayFormats: { hour: 'MM/DD HH:mm' }
-      }
-    }]
+        displayFormats: { hour: 'MM/DD HH:mm' },
+        tooltipFormat: 'YYYY-MM-DD HH:mm:ss'
+      },
+      ticks: { maxRotation: 0 }
+    }
   },
-  tooltips: { mode: 'index', intersect: false },
+  plugins: {
+    tooltip: { mode: 'index', intersect: false }
+  },
   responsive: true
 };
 
-/* ---- pan/zoom 共通ヘルパー（Chart.js 2.7.3 + chartjs-plugin-zoom@0.7.7） ---- */
-// zoomKey を渡すと pan/zoom + 遅延ロードを有効化。x軸に ticks(空) を持たせて
-// zoomプラグインが書き込む ticks.min/max の参照先を安定させる。
-function makeTimeXAxis(zoomKey) {
-  const x = {
+/* ---- pan/zoom 共通ヘルパー（Chart.js 4.5.1 + chartjs-plugin-zoom@2.2.0） ---- */
+// zoomKey を渡すと pan/zoom + 遅延ロードを有効化。v4 では表示範囲が scales.x.min/max に
+// 一本化されており、プラグインもそこへ書き戻すのでダミーの ticks は不要。
+// tooltipFormat 未指定だとアダプタ既定の英語書式（"Aug 20, 2026, 6:32:59 pm" / "12 PM"）に
+// なるため明示する。軸の目盛りは displayFormats、ツールチップは tooltipFormat が担当。
+//
+// maxRotation: 0 は v2.7.3 と同じ見た目を保つために必要。ラベルが入り切らないとき、
+// v2 は「間引く」だけだったが v3 以降は先に「傾ける」ため、既定のままだと1時間おきの
+// ラベルが 34度 傾いて並ぶ。0 を指定すると傾けられなくなり、v2 と同じく autoSkip が
+// 間引いて（24h 表示なら2時間おき）水平に並ぶ。表示幅に応じた自動調整は維持される。
+function makeTimeXAxis() {
+  return {
     type: 'time',
-    distribution: 'linear',
-    time: { unit: 'hour', displayFormats: { hour: 'MM/DD HH:mm' } }
+    time: {
+      unit: 'hour',
+      displayFormats: { hour: 'MM/DD HH:mm' },
+      tooltipFormat: 'YYYY-MM-DD HH:mm:ss'
+    },
+    ticks: { maxRotation: 0 }
   };
-  if (zoomKey) x.ticks = {};
-  return x;
 }
 
 // zoom プラグイン設定（options.plugins.zoom）。完了コールバックは引数形状に依存せず、
 // zoomKey で登録済みのローダーを registry から引いて起動する。
+// v2 では zoom.enabled が廃止され、wheel / pinch / drag を個別に指定する。
 function makeZoomPlugin(zoomKey) {
   return {
+    pan: { enabled: true, mode: 'x', onPanComplete: () => triggerLazy(zoomKey) },
     zoom: {
-      pan: { enabled: true, mode: 'x', onPanComplete: () => triggerLazy(zoomKey) },
-      zoom: { enabled: true, mode: 'x', drag: false, speed: 0.1, onZoomComplete: () => triggerLazy(zoomKey) }
+      wheel: { enabled: true, speed: 0.1 },
+      pinch: { enabled: true },
+      drag: { enabled: false },
+      mode: 'x',
+      onZoomComplete: () => triggerLazy(zoomKey)
     }
   };
 }
@@ -549,19 +576,24 @@ function triggerLazy(key) {
   if (l) l.onComplete();
 }
 
+// zoom プラグイン設定を共通 plugins へ合成する（tooltip 設定を潰さないため）。
+function withZoom(options, zoomKey) {
+  if (zoomKey) {
+    options.plugins = { ...CHART_COMMON_OPTIONS.plugins, zoom: makeZoomPlugin(zoomKey) };
+  }
+  return options;
+}
+
 function createTHPChart(canvas, zoomKey) {
-  const options = {
+  const options = withZoom({
     ...CHART_COMMON_OPTIONS,
     scales: {
-      xAxes: [ makeTimeXAxis(zoomKey) ],
-      yAxes: [
-        { id: 'y1', position: 'left', ticks: { fontColor: 'rgba(220,40,20,0.8)' } },
-        { id: 'y2', position: 'right', ticks: { fontColor: 'rgba(60,90,220,0.8)' }, gridLines: { drawOnChartArea: false } },
-        { id: 'y3', position: 'right', ticks: { fontColor: 'rgba(60,240,20,0.8)' }, gridLines: { drawOnChartArea: false } }
-      ]
+      x: makeTimeXAxis(),
+      y1: { position: 'left', ticks: { color: 'rgba(220,40,20,0.8)' } },
+      y2: { position: 'right', ticks: { color: 'rgba(60,90,220,0.8)' }, grid: { drawOnChartArea: false } },
+      y3: { position: 'right', ticks: { color: 'rgba(60,240,20,0.8)' }, grid: { drawOnChartArea: false } }
     }
-  };
-  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+  }, zoomKey);
 
   return new Chart(canvas, {
     type: 'line',
@@ -578,14 +610,13 @@ function createTHPChart(canvas, zoomKey) {
 }
 
 function createPIRChart(canvas, zoomKey) {
-  const options = {
+  const options = withZoom({
     ...CHART_COMMON_OPTIONS,
     scales: {
-      xAxes: [ makeTimeXAxis(zoomKey) ],
-      yAxes: [{ ticks: { beginAtZero: true } }]
+      x: makeTimeXAxis(),
+      y: { beginAtZero: true }
     }
-  };
-  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+  }, zoomKey);
 
   return new Chart(canvas, {
     type: 'line',
@@ -600,14 +631,13 @@ function createPIRChart(canvas, zoomKey) {
 }
 
 function createMixPIRChart(canvas, zoomKey) {
-  const options = {
+  const options = withZoom({
     ...CHART_COMMON_OPTIONS,
     scales: {
-      xAxes: [ makeTimeXAxis(zoomKey) ],
-      yAxes: [{ ticks: { beginAtZero: true } }]
+      x: makeTimeXAxis(),
+      y: { beginAtZero: true }
     }
-  };
-  if (zoomKey) options.plugins = makeZoomPlugin(zoomKey);
+  }, zoomKey);
 
   return new Chart(canvas, {
     type: 'line',
@@ -711,30 +741,24 @@ function toJstParam(date) {
          p(date.getHours()) + ':' + p(date.getMinutes()) + ':' + p(date.getSeconds());
 }
 
-// 水平(x)スケールを取得（v2 の既定id 'x-axis-0'）。null安全＋フォールバック付き。
+// 水平(x)スケールを取得（v4 の既定id は 'x'）。null安全＋フォールバック付き。
 function getXScale(chart) {
   if (!chart || !chart.scales) return null;
   for (const id in chart.scales) {
     const s = chart.scales[id];
     if (s && typeof s.isHorizontal === 'function' && s.isHorizontal()) return s;
   }
-  return chart.scales['x-axis-0'] || null;
+  return chart.scales.x || null;
 }
 
 // 時間軸の表示ウィンドウを設定する。
-// Chart.js 2.7.3 の time スケールは determineDataLimits/buildTicks で
-// options.time.min / options.time.max のみを見て範囲を決める（ticks.min/max は無視）。
-// また chartjs-plugin-zoom@0.7.7 の panTimeScale は options.time.min/max が
-// 既に truthy のときだけパン結果を time.min/max へ書き戻す。よって window 制御は
-// 必ず time.min/max を主にする（ticks.min/max も一応揃えておく）。
+// Chart.js v3 以降は time.min/max が廃止され、表示範囲は scales.x.min/max に一本化された。
+// chartjs-plugin-zoom@2.x の updateRange() もパン/ズーム結果を同じ scaleOpts.min/max へ
+// 書き戻すため、アプリ側とプラグイン側で参照先が一致する（v2.7.3 の二重書きは不要）。
 function setChartWindow(chart, minMs, maxMs) {
-  const xAxis = chart.options.scales.xAxes[0];
-  if (!xAxis.time) xAxis.time = {};
-  if (!xAxis.ticks) xAxis.ticks = {};
-  xAxis.time.min = minMs;
-  xAxis.time.max = maxMs;
-  xAxis.ticks.min = minMs;
-  xAxis.ticks.max = maxMs;
+  const xAxis = chart.options.scales.x;
+  xAxis.min = minMs;
+  xAxis.max = maxMs;
 }
 
 // 汎用の pan/zoom 遅延ローダー。1インスタンスが1チャート分の状態を保持する。
@@ -819,7 +843,7 @@ function createLazyPanLoader(config) {
       const curMax = xs2 ? xs2.max : null;
       config.render(chart, seriesPoints);
       if (curMin !== null) setChartWindow(chart, curMin, curMax);
-      chart.update(0); // v2.7.3 のアニメ無し即時再描画。'none' は v3+ 用でNaN化して描画されない
+      chart.update('none'); // v3+ のアニメ無し即時再描画（v2 の update(0) 相当）
       isLoading = false;
 
       // 進捗があり、まだ埋めきれていない場合のみ連続取得（oldest が過去へ進むので自然停止）。
@@ -839,8 +863,10 @@ function createLazyPanLoader(config) {
       oldest = start;
       reachedStart = false;
       isLoading = false;
-      // 次のパンで新しい基準窓を「元の範囲」として記憶させる（resetZoom の戻り先を更新）
-      if (chart.$zoom) chart.$zoom._originalOptions = {};
+      // resetZoom の戻り先はプラグイン側が自動追従する。plugin@2.x の
+      // shouldUpdateScaleLimits() が「プラグインが最後に書いた min/max」と現在の
+      // options を比較し、下の setChartWindow による外部変更を検知して基準を取り直すため、
+      // v0.7.7 で必要だった内部プロパティ($zoom._originalOptions)のリセットは不要。
       config.render(chart, seriesPoints);
       setChartWindow(chart, start, end);
       chart.update();
