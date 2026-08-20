@@ -35,3 +35,6 @@ CLAUDE.local.md
 server/qaqaqaa.php
 server/qaqaqab.php
 server/qmqmqm.php
+
+# ローカル検証用ハーネス（デプロイ・公開しないこと）
+server/_harness*
