@@ -200,8 +200,9 @@ def setup():
 
 
 # --- 初期化 ---
-setup()
-get_calib_param()
+write_reg(0xF4, 0x24)  # 一旦 sleep。変換中は数ms応答しない個体があるため
+get_calib_param()      # 較正値は工場書き込みの静的データ。変換を止めた状態で読む
+setup()                # 通常モード(normal)で観測を開始
 
 if __name__ == '__main__':
     try:
