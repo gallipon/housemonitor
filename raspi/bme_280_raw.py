@@ -5,6 +5,8 @@ I2C経由でBME280から温度・湿度・気圧を読み取り、サーバー�
 """
 
 import json
+import sys
+import time
 import datetime
 import urllib.request
 from smbus2 import SMBus
@@ -16,6 +18,18 @@ BUS_NUMBER = 1
 I2C_ADDRESS = 0x76
 
 bus = SMBus(BUS_NUMBER)
+
+# 変換完了前のデータレジスタが返す値。補正すると
+# T=24.23 / H=71.78 / P=606.06 という固定の異常値になる
+RESET_RAW = (0x80000, 0x80000, 0x8000)
+
+# 送信前の妥当性チェック。屋内設置を前提に広めに取る
+# （気圧の下限 870hPa は観測史上の最低海面気圧より低い）
+VALID_RANGE = {
+    'temperature': (-20.0, 60.0),
+    'humidity': (0.0, 100.0),
+    'pressure': (870.0, 1085.0),
+}
 
 # キャリブレーションパラメータ（get_calib_param()で初期化）
 dig_t = []
@@ -82,16 +96,51 @@ def get_calib_param():
             dig_h[i] = (-dig_h[i] ^ 0xFFFF) + 1
 
 
-def read_data():
-    """センサーからデータを読み取り、補正後にサーバーへ送信する"""
+def skip(reason):
+    """送信を見送った理由を stderr に出す。握りつぶすと欠測が黙って増える"""
+    stamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    sys.stderr.write("%s 送信を見送りました: %s\n" % (stamp, reason))
+
+
+def wait_for_measurement(timeout=0.5):
+    """通常モードへ入れた直後、第1変換が終わるまで待つ
+
+    待たずに読むと変換完了前のデータレジスタ（RESET_RAW）を掴む。
+    チップが何かの拍子にリセットされた直後だけ起きるので、たまにしか現れない。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        status = bus.read_byte_data(I2C_ADDRESS, 0xF3)
+        # bit3=measuring, bit0=im_update(NVMコピー中)
+        if not (status & 0x09):
+            return True
+        time.sleep(0.001)
+    return False
+
+
+def read_raw():
+    """データレジスタを読み、(気圧, 温度, 湿度) の生データを返す"""
     data = []
     for i in range(0xF7, 0xF7 + 8):
         data.append(bus.read_byte_data(I2C_ADDRESS, i))
+    return ((data[0] << 12) | (data[1] << 4) | (data[2] >> 4),
+            (data[3] << 12) | (data[4] << 4) | (data[5] >> 4),
+            (data[6] << 8) | data[7])
 
-    # 生データの組み立て
-    pres_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
-    temp_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
-    hum_raw = (data[6] << 8) | data[7]
+
+def read_data():
+    """センサーからデータを読み取り、補正後にサーバーへ送信する"""
+    wait_for_measurement()
+    pres_raw, temp_raw, hum_raw = read_raw()
+
+    # 変換完了前を掴んだら、1変換ぶん待って読み直す（欠測にしない）
+    if (pres_raw, temp_raw, hum_raw) == RESET_RAW:
+        time.sleep(0.05)
+        wait_for_measurement()
+        pres_raw, temp_raw, hum_raw = read_raw()
+        if (pres_raw, temp_raw, hum_raw) == RESET_RAW:
+            skip('変換完了前のレジスタしか読めなかった（リセット直後）')
+            return
 
     # 補正値の計算（温度→湿度→気圧の順。t_fineが温度で設定される）
     temperature = compensate_t(temp_raw)
@@ -106,6 +155,13 @@ def read_data():
         'pressure': pressure.strip(),
         'measured': measured_at,
     }
+
+    for key, (low, high) in VALID_RANGE.items():
+        value = float(payload[key])
+        if not low <= value <= high:
+            skip('%s=%s が範囲外 (%s〜%s)' % (key, payload[key], low, high))
+            return
+
     json_data = json.dumps(payload).encode('utf-8')
 
     send_data(BME280_ENDPOINT, json_data)
