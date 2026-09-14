@@ -292,7 +292,9 @@ if (isset($_GET['action'])) {
 <head>
   <meta charset="UTF-8">
   <title>お部屋モニタリング</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f3f0" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
   <meta name="csrf-token" content="<?php echo htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8'); ?>">
   <meta name="script-name" content="<?php echo htmlspecialchars(basename($_SERVER['PHP_SELF']), ENT_QUOTES, 'UTF-8'); ?>">
 
@@ -318,143 +320,627 @@ if (isset($_GET['action'])) {
   <script src="assets/chartjs-plugin-zoom.min.js"></script>
 
   <style>
-    body { padding-bottom: 80px; padding-top: 20px; }
-    .bottom-tabs {
-      position: fixed;
-      bottom: 0; left: 0; right: 0;
-      background: #f8f9fa;
-      border-top: 1px solid #ddd;
+    /* ===== デザイントークン =====
+       ウォームグレー基調（純グレーより柔らかい）＋ 系列ごとの固定色。
+       グラフの色も JS がここから読むので、色を変えるときはこのブロックだけ触ればよい。 */
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f3f0;
+      --surface: #ffffff;
+      --surface-2: #efede9;
+      --border: #e3e0da;
+      --text: #23221e;
+      --text-2: #6b6862;
+      --text-3: #9a968e;
+      --accent: #2f6bd8;
+      --accent-contrast: #ffffff;
+      --grid: rgba(35, 34, 30, 0.07);
+      --bar-bg: rgba(255, 255, 255, 0.86);
+      --tooltip-bg: rgba(35, 34, 30, 0.92);
+      --tooltip-text: #ffffff;
+      --c-temp: #e0533b;
+      --c-humid: #2f7fe0;
+      --c-press: #13977a;
+      --c-pir-a: #d9950a;
+      --c-pir-b: #8a5cf0;
+      --shadow: 0 1px 2px rgba(35, 34, 30, 0.04), 0 4px 14px rgba(35, 34, 30, 0.05);
+      --radius: 14px;
+      /* 和文: macOS/iOS はヒラギノ、Windows は system-ui 経由で Yu Gothic UI、Android は Noto Sans JP */
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+                   "Noto Sans JP", "Yu Gothic UI", "Yu Gothic", Meiryo, sans-serif;
+      --tabbar-h: 64px;
     }
-    .latest-values p { margin: 0; font-weight: bold; }
-    canvas { max-width: 100%; height: 380px; }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121211;
+        --surface: #1c1b19;
+        --surface-2: #272623;
+        --border: #34322e;
+        --text: #efede8;
+        --text-2: #aaa69e;
+        --text-3: #7f7b74;
+        --accent: #6c9dff;
+        --accent-contrast: #0c1424;
+        --grid: rgba(239, 237, 232, 0.08);
+        --bar-bg: rgba(28, 27, 25, 0.86);
+        --tooltip-bg: rgba(58, 56, 52, 0.96);
+        --tooltip-text: #f5f3ef;
+        --c-temp: #ff7b63;
+        --c-humid: #62a6ff;
+        --c-press: #3fcaa6;
+        --c-pir-a: #f3b73e;
+        --c-pir-b: #ad8dff;
+        --shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      }
+    }
+
+    /* ===== ベース ===== */
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-sans);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      -webkit-text-size-adjust: 100%;
+    }
+    button { font-family: inherit; }
+    .num { font-variant-numeric: tabular-nums; }
+
+    /* ===== ヘッダー ===== */
+    .app-header {
+      position: sticky;
+      top: 0;
+      z-index: 1020;
+      background: var(--bar-bg);
+      -webkit-backdrop-filter: saturate(1.4) blur(16px);
+      backdrop-filter: saturate(1.4) blur(16px);
+      border-bottom: 1px solid var(--border);
+      padding-top: env(safe-area-inset-top);
+    }
+    .app-header__inner {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding: 0 16px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand__mark {
+      flex: none;
+      width: 32px; height: 32px;
+      border-radius: 9px;
+      background: var(--accent);
+      color: var(--accent-contrast);
+      display: grid;
+      place-items: center;
+      font-size: 16px;
+    }
+    .brand__title {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-feature-settings: "palt";
+      white-space: nowrap;
+    }
+    .icon-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      height: 36px;
+      padding: 0 12px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text-2);
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .icon-btn:hover, .icon-btn:focus { color: var(--text); background: var(--surface-2); text-decoration: none; }
+
+    /* ===== メイン ===== */
+    /* 画面の主役はグラフ。見出しや枠の余白は最小限にして、残りの高さをグラフに回す。 */
+    .app-main {
+      max-width: 1320px;
+      margin: 0 auto;
+      padding-inline: 16px;
+      padding-block: 12px calc(var(--tabbar-h) + 20px + env(safe-area-inset-bottom));
+    }
+    /* タブ状態を URL の #roomA 等に保存しているため、リロード時にブラウザがその位置へスクロールする。
+       固定ヘッダーの下に隠れないよう、ヘッダー高さ＋上余白ぶんずらす（= 実質スクロールしない位置）。 */
+    .tab-pane { scroll-margin-top: calc(68px + env(safe-area-inset-top)); }
+    .section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 6px 12px;
+      margin-bottom: 8px;
+    }
+    .section-meta { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 10px 8px 6px;
+    }
+    .panel + .panel, .stack > * + * { margin-top: 8px; }
+    .panel__head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 4px 6px;
+    }
+    .panel__title {
+      margin: 0;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      font-feature-settings: "palt";
+    }
+    /* 高さは「画面の高さの残り（ヘッダー・最新値・タブバーを引いた分）」と「横幅の40%」の大きい方。
+       横長の低い画面でも、元の版（横幅の半分の高さ）に近い縦横比を保つ。上限は横幅の75%。
+       dvh 非対応ブラウザ向けに vh 版を先に書く。 */
+    .chart-box {
+      position: relative;
+      height: clamp(320px, max(calc(100vh - 270px), 40vw), min(760px, 75vw));
+      height: clamp(320px, max(calc(100dvh - 270px), 40vw), min(760px, 75vw));
+    }
+    /* 注意: canvas に touch-action: pan-y を付けて縦スワイプをページスクロールに回す案は採らない。
+       iPad Safari でピンチが途中で打ち切られ、縮小できなくなった（2026-09-14 実機で確認）。
+       Hammer.js が付ける touch-action: none のままにしておくこと。 */
+    .chart-box--sm {
+      height: clamp(220px, max(calc((100vh - 330px) / 2), 26vw), min(440px, 45vw));
+      height: clamp(220px, max(calc((100dvh - 330px) / 2), 26vw), min(440px, 45vw));
+    }
+    .note {
+      display: flex;
+      gap: 6px;
+      margin: 8px 4px 0;
+      font-size: 12px;
+      color: var(--text-2);
+      line-height: 1.5;
+    }
+    .note .fa { color: var(--text-3); margin-top: 3px; }
+
+    /* ===== 最新値（1本の帯に区切り線で並べる。カードを分けるより縦横の余白が少ない） ===== */
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+    .stat-grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .stat {
+      --stat-color: var(--accent);
+      position: relative;
+      padding: 8px 14px 9px;
+      min-width: 0;
+    }
+    .stat + .stat { border-left: 1px solid var(--border); }
+    .stat--temp  { --stat-color: var(--c-temp); }
+    .stat--humid { --stat-color: var(--c-humid); }
+    .stat--press { --stat-color: var(--c-press); }
+    .stat--pir-a { --stat-color: var(--c-pir-a); }
+    .stat--pir-b { --stat-color: var(--c-pir-b); }
+    .stat__label {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-2);
+      letter-spacing: 0.04em;
+      font-feature-settings: "palt";
+      white-space: nowrap;
+    }
+    .stat__label .fa { color: var(--stat-color); width: 14px; text-align: center; }
+    .stat__value {
+      display: flex;
+      align-items: baseline;
+      gap: 3px;
+      margin-top: 2px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .stat__num {
+      font-size: 26px;
+      font-weight: 700;
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+    }
+    .stat__num--time { font-size: 20px; }
+    .stat__unit { font-size: 12px; font-weight: 600; color: var(--text-2); }
+    .stat__trend { margin-left: auto; font-size: 15px; line-height: 1; color: var(--text-3); }
+    .stat__trend.is-up, .stat__trend.is-down { color: var(--stat-color); }
+    /* パネル内に置く帯（まとめタブ）は枠を消して面の色だけで区切る */
+    .stat-grid--compact { background: var(--surface-2); border: 0; box-shadow: none; border-radius: 10px; margin: 0 2px; }
+    .stat-grid--compact .stat + .stat { border-left-color: var(--bg); border-left-width: 2px; }
+    .stat-grid--compact .stat { padding: 6px 12px 7px; }
+    .stat-grid--compact .stat__num { font-size: 20px; }
+    .stat-grid--compact .stat__num--time { font-size: 17px; }
+
+    /* ===== PC: ホイールはグラフ上だと拡大に使われるので、ページをスクロールできる余白を左右に残す =====
+       最大幅は元の版（Bootstrap container）と同じ 1140px。枠の内側の余白もスクロール可能な領域になる。 */
+    @media (min-width: 992px) {
+      .app-header__inner, .app-main { max-width: 1140px; padding-inline: 24px; }
+      .panel { padding: 12px 20px 8px; }
+      .stat-grid--compact { margin: 0; }
+      .chart-box { height: clamp(320px, calc(100vh - 270px), 600px); height: clamp(320px, calc(100dvh - 270px), 600px); }
+      .chart-box--sm { height: clamp(220px, calc((100vh - 330px) / 2), 360px); height: clamp(220px, calc((100dvh - 330px) / 2), 360px); }
+    }
+
+    /* ===== スマホ: 余白を詰めて、グラフの幅と高さを最大にする ===== */
+    @media (max-width: 575.98px) {
+      .app-header__inner { height: 48px; padding: 0 10px; }
+      .brand__mark { width: 28px; height: 28px; font-size: 14px; border-radius: 8px; }
+      /* 左右の余白はグラフ外でスクロールできる「つかみしろ」も兼ねるので、詰めすぎない */
+      .app-main { padding-inline: 14px; padding-top: 8px; }
+      .tab-pane { scroll-margin-top: calc(56px + env(safe-area-inset-top)); }
+      .panel { padding: 8px 4px 4px; border-radius: 12px; }
+      .stat-grid { border-radius: 12px; }
+      .stat { padding: 6px 8px 7px; }
+      .stat__label { font-size: 11px; gap: 4px; }
+      .stat__label .fa { width: 11px; }
+      .stat__num { font-size: 21px; }
+      .stat__num--time { font-size: 17px; }
+      .stat__unit { font-size: 11px; }
+      .stat__trend { font-size: 13px; }
+      .stat-grid--compact .stat { padding: 5px 8px 6px; }
+      .stat-grid--compact .stat__num { font-size: 17px; }
+      .stat-grid--compact .stat__num--time { font-size: 15px; }
+      /* 縦長の画面で伸びすぎないよう、上限を横幅の125%にする（時刻操作が画面外へ押し出されないように） */
+      .chart-box { height: clamp(280px, calc(100vh - 250px), 125vw); height: clamp(280px, calc(100dvh - 250px), 125vw); }
+      .chart-box--sm { height: clamp(200px, calc((100vh - 300px) / 2), 75vw); height: clamp(200px, calc((100dvh - 300px) / 2), 75vw); }
+      .time-panel { margin-top: 8px; }
+    }
+
+    /* ===== セグメント切替（部屋A のサブタブ） ===== */
+    .segmented {
+      display: inline-flex;
+      gap: 2px;
+      padding: 3px;
+      border-radius: 10px;
+      background: var(--surface-2);
+    }
+    .segmented__btn {
+      appearance: none;
+      border: 0;
+      border-radius: 8px;
+      background: transparent;
+      color: var(--text-2);
+      font-size: 13px;
+      font-weight: 600;
+      line-height: 1.4;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    .segmented__btn.active {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 0 0 1px var(--border), 0 1px 2px rgba(0, 0, 0, 0.08);
+    }
+    .segmented__btn:focus { outline: none; }
+    .segmented__btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    /* ===== 時刻操作パネル ===== */
+    .time-panel { margin-top: 12px; padding: 10px; }
+    .time-nav { display: grid; grid-template-columns: 1fr 1fr 1.25fr 1fr 1fr; gap: 6px; }
+    .tn-btn {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      height: 42px;
+      padding: 0 4px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: background-color .15s ease, transform .08s ease;
+    }
+    .tn-btn .fa { color: var(--text-3); font-size: 15px; }
+    .tn-btn:hover { background: var(--surface-2); }
+    .tn-btn:active { transform: scale(0.97); }
+    .tn-btn:focus { outline: none; }
+    .tn-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .tn-btn--now { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
+    .tn-btn--now .fa { color: inherit; }
+    .tn-btn--now:hover { background: var(--accent); filter: brightness(1.06); }
+    @media (max-width: 399.98px) {
+      .tn-btn:not(.tn-btn--now) .fa { display: none; }
+    }
+    .picker-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+    .picker-label { flex: none; margin: 0; font-size: 12px; font-weight: 600; color: var(--text-2); }
+    .picker-row .input-group { flex: 1; min-width: 0; }
+    .picker-row .form-control,
+    .picker-row .input-group-text {
+      height: 42px;
+      border-color: var(--border);
+      background: var(--surface-2);
+      color: var(--text);
+    }
+    .picker-row .form-control {
+      border-radius: 10px 0 0 10px;
+      font-size: 15px;
+      font-variant-numeric: tabular-nums;
+    }
+    .picker-row .form-control:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47, 107, 216, 0.18); }
+    .picker-row .input-group-text { border-radius: 0 10px 10px 0; color: var(--text-2); cursor: pointer; }
+    .hint { margin: 10px 2px 0; font-size: 11px; color: var(--text-3); text-align: center; line-height: 1.5; }
+
+    /* Tempus Dominus のポップアップをテーマに合わせる */
+    .bootstrap-datetimepicker-widget.dropdown-menu {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+    }
+    .bootstrap-datetimepicker-widget.dropdown-menu.bottom:before { border-bottom-color: var(--border); }
+    .bootstrap-datetimepicker-widget.dropdown-menu.bottom:after  { border-bottom-color: var(--surface); }
+    .bootstrap-datetimepicker-widget.dropdown-menu.top:before    { border-top-color: var(--border); }
+    .bootstrap-datetimepicker-widget.dropdown-menu.top:after     { border-top-color: var(--surface); }
+    .bootstrap-datetimepicker-widget table td.day:hover,
+    .bootstrap-datetimepicker-widget table td.hour:hover,
+    .bootstrap-datetimepicker-widget table td.minute:hover,
+    .bootstrap-datetimepicker-widget table td span:hover,
+    .bootstrap-datetimepicker-widget table thead tr:first-child th:hover,
+    .bootstrap-datetimepicker-widget .btn[data-action]:hover { background: var(--surface-2); }
+    .bootstrap-datetimepicker-widget table td.active,
+    .bootstrap-datetimepicker-widget table td.active:hover,
+    .bootstrap-datetimepicker-widget table td span.active { background: var(--accent); color: var(--accent-contrast); }
+    .bootstrap-datetimepicker-widget table td.old,
+    .bootstrap-datetimepicker-widget table td.new { color: var(--text-3); }
+    .bootstrap-datetimepicker-widget table td.today:before { border-bottom-color: var(--accent); }
+    .bootstrap-datetimepicker-widget a[data-action],
+    .bootstrap-datetimepicker-widget .btn { color: var(--accent); }
+    .bootstrap-datetimepicker-widget .timepicker-hour,
+    .bootstrap-datetimepicker-widget .timepicker-minute { color: var(--text); font-variant-numeric: tabular-nums; }
+
+    /* ===== 下部タブバー ===== */
+    .tabbar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      z-index: 1030;
+      padding: 6px 12px calc(6px + env(safe-area-inset-bottom));
+      background: var(--bar-bg);
+      -webkit-backdrop-filter: saturate(1.4) blur(16px);
+      backdrop-filter: saturate(1.4) blur(16px);
+      border-top: 1px solid var(--border);
+    }
+    .tabbar .nav-tabs { max-width: 520px; margin: 0 auto; gap: 4px; border: 0; flex-wrap: nowrap; }
+    .tabbar .nav-item { flex: 1; margin: 0; }
+    .tabbar .nav-tabs .nav-link {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 3px;
+      margin: 0;
+      padding: 6px 4px;
+      border: 0;
+      border-radius: 10px;
+      background: transparent;
+      color: var(--text-3);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      line-height: 1.2;
+    }
+    .tabbar .nav-tabs .nav-link .fa { font-size: 20px; line-height: 1; }
+    .tabbar .nav-tabs .nav-link:hover { color: var(--text-2); }
+    .tabbar .nav-tabs .nav-link.active { color: var(--accent); background: var(--surface-2); }
+
+    /* ===== 通知（トースト） ===== */
     .alert-security {
       position: fixed;
-      top: 10px;
-      right: 10px;
-      z-index: 9999;
-      max-width: 300px;
+      top: calc(12px + env(safe-area-inset-top));
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 2000;
+      width: max-content;
+      max-width: min(92vw, 380px);
+      border: 0;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+      font-size: 14px;
     }
-    .logout-btn {
-      position: fixed;
-      top: 10px;
-      left: 10px;
-      z-index: 9998;
+    @media (max-width: 399.98px) {
+      .icon-btn__text { display: none; }
     }
-    #roomMix canvas { height: 260px; }
-    .mix-section-label { font-size: 0.8rem; color: #6c757d; text-align: center; margin: 6px 0 2px; }
   </style>
 </head>
 <body>
-<a href="logout.php" class="btn btn-sm btn-secondary logout-btn">
-  <i class="fa fa-sign-out"></i> ログアウト
-</a>
-<div class="container">
+<header class="app-header">
+  <div class="app-header__inner">
+    <div class="brand">
+      <span class="brand__mark" aria-hidden="true"><i class="fa fa-home"></i></span>
+      <h1 class="brand__title">お部屋モニタリング</h1>
+    </div>
+    <a href="logout.php" class="icon-btn" aria-label="ログアウト">
+      <i class="fa fa-sign-out" aria-hidden="true"></i><span class="icon-btn__text">ログアウト</span>
+    </a>
+  </div>
+</header>
+
+<main class="app-main">
   <!-- タブコンテンツ -->
   <div class="tab-content">
     <!-- 部屋A（温湿度・気圧 / 人感 切替） -->
-    <div class="tab-pane fade show active" id="roomA">
-      <div class="btn-group btn-group-sm w-100 mb-2" role="group" id="roomA-subtabs">
-        <button type="button" class="btn btn-primary active" data-subtab="thp">温度・湿度・気圧</button>
-        <button type="button" class="btn btn-outline-primary" data-subtab="pir-a">人感センサー</button>
+    <section class="tab-pane fade show active" id="roomA">
+      <div class="section-head">
+        <div class="segmented" role="tablist" id="roomA-subtabs" aria-label="部屋A の表示切替">
+          <button type="button" class="segmented__btn active" role="tab" aria-selected="true" data-subtab="thp">温湿度・気圧</button>
+          <button type="button" class="segmented__btn" role="tab" aria-selected="false" data-subtab="pir-a">人感センサー</button>
+        </div>
+        <span class="section-meta" id="latest-measured-thp"></span>
       </div>
-      <div id="roomA-thp">
-        <div id="chart-thp"></div>
+
+      <div id="roomA-thp" class="stack">
+        <div class="stat-grid">
+          <div class="stat stat--temp">
+            <div class="stat__label"><i class="fa fa-thermometer-half" aria-hidden="true"></i>温度</div>
+            <div class="stat__value"><span class="stat__num" id="latest-temp">-</span><span class="stat__unit">°C</span><span class="stat__trend" id="latest-temp-trend"></span></div>
+          </div>
+          <div class="stat stat--humid">
+            <div class="stat__label"><i class="fa fa-tint" aria-hidden="true"></i>湿度</div>
+            <div class="stat__value"><span class="stat__num" id="latest-humid">-</span><span class="stat__unit">%</span><span class="stat__trend" id="latest-humid-trend"></span></div>
+          </div>
+          <div class="stat stat--press">
+            <div class="stat__label"><i class="fa fa-tachometer" aria-hidden="true"></i>気圧</div>
+            <div class="stat__value"><span class="stat__num" id="latest-press">-</span><span class="stat__unit">hPa</span><span class="stat__trend" id="latest-press-trend"></span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="chart-box" id="chart-thp"></div>
 <?php if ($bme_is_adjusted): ?>
-        <p class="text-muted small mt-1 mb-0" title="環境変数 HOUSEMONITOR_BME280_TABLE で補正済みデータ元が指定されています。">
-          ※ 湿度はセンサー補正を適用した推定値です（生値ではありません）
-        </p>
+          <p class="note" title="環境変数 HOUSEMONITOR_BME280_TABLE で補正済みデータ元が指定されています。">
+            <i class="fa fa-info-circle" aria-hidden="true"></i><span>湿度はセンサー補正を適用した推定値です（生値ではありません）</span>
+          </p>
 <?php endif; ?>
-        <div class="row latest-values text-white mt-2">
-          <p class="col-sm-3 p-1 bg-info text-center" id="latest-measured-thp"></p>
-          <p class="col-sm-3 p-1 bg-danger text-center" id="latest-temp"></p>
-          <p class="col-sm-3 p-1 bg-primary text-center" id="latest-humid"></p>
-          <p class="col-sm-3 p-1 bg-success text-center" id="latest-press"></p>
         </div>
       </div>
-      <div id="roomA-pir-a" style="display: none;">
-        <div id="chart-pir-a"></div>
-        <div class="row latest-values text-dark mt-2">
-          <p class="col-sm-6 p-1 bg-info text-white text-center" id="latest-measured-pir-a"></p>
-          <p class="col-sm-6 p-1 bg-warning text-dark text-center" id="latest-count-a"></p>
+
+      <div id="roomA-pir-a" class="stack" style="display: none;">
+        <div class="stat-grid stat-grid--2">
+          <div class="stat stat--pir-a">
+            <div class="stat__label"><i class="fa fa-clock-o" aria-hidden="true"></i>最終検知</div>
+            <div class="stat__value"><span class="stat__num stat__num--time" id="latest-measured-pir-a">-</span></div>
+          </div>
+          <div class="stat stat--pir-a">
+            <div class="stat__label"><i class="fa fa-street-view" aria-hidden="true"></i>検知回数</div>
+            <div class="stat__value"><span class="stat__num" id="latest-count-a">-</span><span class="stat__unit">回</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="chart-box" id="chart-pir-a"></div>
         </div>
       </div>
-    </div>
+    </section>
 
     <!-- 部屋B（人感のみ） -->
-    <div class="tab-pane fade" id="roomB">
-      <div id="chart-pir-b"></div>
-      <div class="row latest-values text-dark mt-2">
-        <p class="col-sm-6 p-1 bg-info text-white text-center" id="latest-measured-pir-b"></p>
-        <p class="col-sm-6 p-1 bg-warning text-dark text-center" id="latest-count-b"></p>
+    <section class="tab-pane fade" id="roomB">
+      <div class="stack">
+        <div class="stat-grid stat-grid--2">
+          <div class="stat stat--pir-b">
+            <div class="stat__label"><i class="fa fa-clock-o" aria-hidden="true"></i>最終検知</div>
+            <div class="stat__value"><span class="stat__num stat__num--time" id="latest-measured-pir-b">-</span></div>
+          </div>
+          <div class="stat stat--pir-b">
+            <div class="stat__label"><i class="fa fa-street-view" aria-hidden="true"></i>検知回数</div>
+            <div class="stat__value"><span class="stat__num" id="latest-count-b">-</span><span class="stat__unit">回</span></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="chart-box" id="chart-pir-b"></div>
+        </div>
       </div>
-    </div>
+    </section>
 
     <!-- まとめ（温湿度気圧＋PIR比較） -->
-    <div class="tab-pane fade" id="roomMix">
-      <p class="mix-section-label">温度・湿度・気圧（部屋A）</p>
-      <div id="chart-mix-thp"></div>
-      <div class="row latest-values text-white mt-1 mb-3">
-        <p class="col-4 p-1 bg-danger text-center" id="mix-latest-temp">温度 : -</p>
-        <p class="col-4 p-1 bg-primary text-center" id="mix-latest-humid">湿度 : -</p>
-        <p class="col-4 p-1 bg-success text-center" id="mix-latest-press">気圧 : -</p>
+    <section class="tab-pane fade" id="roomMix">
+      <div class="stack">
+        <div class="panel">
+          <div class="panel__head">
+            <h3 class="panel__title">温度・湿度・気圧（部屋A）</h3>
+            <span class="section-meta num" id="mix-latest-measured"></span>
+          </div>
+          <div class="stat-grid stat-grid--compact">
+            <div class="stat stat--temp">
+              <div class="stat__label"><i class="fa fa-thermometer-half" aria-hidden="true"></i>温度</div>
+              <div class="stat__value"><span class="stat__num" id="mix-latest-temp">-</span><span class="stat__unit">°C</span><span class="stat__trend" id="mix-latest-temp-trend"></span></div>
+            </div>
+            <div class="stat stat--humid">
+              <div class="stat__label"><i class="fa fa-tint" aria-hidden="true"></i>湿度</div>
+              <div class="stat__value"><span class="stat__num" id="mix-latest-humid">-</span><span class="stat__unit">%</span><span class="stat__trend" id="mix-latest-humid-trend"></span></div>
+            </div>
+            <div class="stat stat--press">
+              <div class="stat__label"><i class="fa fa-tachometer" aria-hidden="true"></i>気圧</div>
+              <div class="stat__value"><span class="stat__num" id="mix-latest-press">-</span><span class="stat__unit">hPa</span><span class="stat__trend" id="mix-latest-press-trend"></span></div>
+            </div>
+          </div>
+          <div class="chart-box chart-box--sm mt-2" id="chart-mix-thp"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel__head"><h3 class="panel__title">人感センサー比較（部屋A・B）</h3></div>
+          <div class="stat-grid stat-grid--2 stat-grid--compact">
+            <div class="stat stat--pir-a">
+              <div class="stat__label"><i class="fa fa-circle" aria-hidden="true"></i>部屋A 最終検知</div>
+              <div class="stat__value"><span class="stat__num stat__num--time" id="mix-latest-a">-</span><span class="stat__unit" id="mix-latest-a-count"></span></div>
+            </div>
+            <div class="stat stat--pir-b">
+              <div class="stat__label"><i class="fa fa-circle" aria-hidden="true"></i>部屋B 最終検知</div>
+              <div class="stat__value"><span class="stat__num stat__num--time" id="mix-latest-b">-</span><span class="stat__unit" id="mix-latest-b-count"></span></div>
+            </div>
+          </div>
+          <div class="chart-box chart-box--sm mt-2" id="chart-mix-pir"></div>
+        </div>
       </div>
-      <p class="mix-section-label">人感センサー比較（部屋A・B）</p>
-      <div id="chart-mix-pir"></div>
-      <div class="row latest-values mt-1">
-        <p class="col-6 p-1 bg-warning text-dark text-center" id="mix-latest-a">部屋A : -</p>
-        <p class="col-6 p-1 bg-light text-dark text-center" id="mix-latest-b">部屋B : -</p>
-      </div>
-    </div>
+    </section>
   </div>
 
-  <!-- 時間ナビゲーション -->
-  <div class="row my-3">
-    <div class="col-12">
-      <div class="btn-group w-100" role="group">
-        <button type="button" class="btn btn-outline-primary" id="time-back-1h">
-          <i class="fa fa-angle-double-left"></i> 1時間前
-        </button>
-        <button type="button" class="btn btn-outline-primary" id="time-back-10m">
-          <i class="fa fa-angle-left"></i> 10分前
-        </button>
-        <button type="button" class="btn btn-primary" id="time-now">
-          <i class="fa fa-clock-o"></i> 現在
-        </button>
-        <button type="button" class="btn btn-outline-primary" id="time-forward-10m">
-          10分後 <i class="fa fa-angle-right"></i>
-        </button>
-        <button type="button" class="btn btn-outline-primary" id="time-forward-1h">
-          1時間後 <i class="fa fa-angle-double-right"></i>
-        </button>
-      </div>
+  <!-- 時刻操作（時間ナビゲーション＋日時ピッカー） -->
+  <section class="panel time-panel" aria-label="表示する時刻">
+    <div class="time-nav" role="group" aria-label="表示時刻の移動">
+      <button type="button" class="tn-btn" id="time-back-1h" aria-label="1時間前へ">
+        <i class="fa fa-angle-double-left" aria-hidden="true"></i><span>1時間</span>
+      </button>
+      <button type="button" class="tn-btn" id="time-back-10m" aria-label="10分前へ">
+        <i class="fa fa-angle-left" aria-hidden="true"></i><span>10分</span>
+      </button>
+      <button type="button" class="tn-btn tn-btn--now" id="time-now">
+        <i class="fa fa-clock-o" aria-hidden="true"></i><span>現在</span>
+      </button>
+      <button type="button" class="tn-btn" id="time-forward-10m" aria-label="10分後へ">
+        <span>10分</span><i class="fa fa-angle-right" aria-hidden="true"></i>
+      </button>
+      <button type="button" class="tn-btn" id="time-forward-1h" aria-label="1時間後へ">
+        <span>1時間</span><i class="fa fa-angle-double-right" aria-hidden="true"></i>
+      </button>
     </div>
-  </div>
 
-  <!-- 日時ピッカー（詳細設定用） -->
-  <div class="input-group my-3" id="datetimepicker-wrapper">
-    <div class="input-group date" id="datetimepicker-common" data-target-input="nearest">
-      <input id="datetime-input" type="text" class="form-control datetimepicker-input" data-target="#datetimepicker-common"/>
-      <div class="input-group-append" data-target="#datetimepicker-common" data-toggle="datetimepicker">
-        <div class="input-group-text"><i class="fa fa-calendar"></i></div>
+    <div class="picker-row">
+      <label class="picker-label" for="datetime-input">基準時刻</label>
+      <div class="input-group date" id="datetimepicker-common" data-target-input="nearest">
+        <input id="datetime-input" type="text" class="form-control datetimepicker-input" data-target="#datetimepicker-common"/>
+        <div class="input-group-append" data-target="#datetimepicker-common" data-toggle="datetimepicker">
+          <div class="input-group-text"><i class="fa fa-calendar" aria-hidden="true"></i></div>
+        </div>
       </div>
     </div>
-  </div>
-</div>
+    <p class="hint">グラフはドラッグで過去へ移動・ピンチ／ホイールで拡大・ダブルクリックで元に戻ります</p>
+  </section>
+</main>
 
 <!-- 下部タブ -->
-<div class="bottom-tabs">
-  <ul class="nav nav-tabs nav-fill">
+<nav class="tabbar" aria-label="表示の切り替え">
+  <ul class="nav nav-tabs">
     <li class="nav-item">
-      <a class="nav-link active" data-toggle="tab" href="#roomA">部屋A</a>
+      <a class="nav-link active" data-toggle="tab" href="#roomA"><i class="fa fa-thermometer-half" aria-hidden="true"></i>部屋A</a>
     </li>
     <li class="nav-item">
-      <a class="nav-link" data-toggle="tab" href="#roomB">部屋B</a>
+      <a class="nav-link" data-toggle="tab" href="#roomB"><i class="fa fa-street-view" aria-hidden="true"></i>部屋B</a>
     </li>
     <li class="nav-item">
-      <a class="nav-link" data-toggle="tab" href="#roomMix">まとめ</a>
+      <a class="nav-link" data-toggle="tab" href="#roomMix"><i class="fa fa-th-large" aria-hidden="true"></i>まとめ</a>
     </li>
   </ul>
-</div>
+</nav>
 
 <script>
 /* ---- セキュリティ設定 ---- */
@@ -484,7 +970,7 @@ $.ajaxSetup({
 // セキュリティアラート表示
 function showSecurityAlert(message, type = 'info') {
     const alertHtml = `
-        <div class="alert alert-${type} alert-dismissible alert-security">
+        <div class="alert alert-${type} alert-dismissible alert-security" role="alert">
             <button type="button" class="close" data-dismiss="alert">&times;</button>
             ${message}
         </div>
@@ -512,8 +998,61 @@ let chartMixPIR = null;
 // なお公式ドキュメントの transitions.zoom.animation.duration = 0 と animations.x = false は
 // この組み合わせでは効かず（実測でズーム時も246msのアニメーションが残った）、
 // animation: false だけが確実に無効化できた。副作用としてデータ読み込み時の演出も消える。
+/* ---- テーマ（色は CSS 変数が唯一の正。ダーク/ライト切替に追従する） ---- */
+// 色系のオプションはすべて「THEME を読む関数（scriptable option）」で渡す。
+// OS のテーマが変わったら THEME を読み直して update するだけで全チャートに反映される。
+function readTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name) => cs.getPropertyValue(name).trim();
+  return {
+    font: v('--font-sans'),
+    text2: v('--text-2'),
+    text3: v('--text-3'),
+    grid: v('--grid'),
+    border: v('--border'),
+    surface: v('--surface'),
+    tooltipBg: v('--tooltip-bg'),
+    tooltipText: v('--tooltip-text'),
+    series: {
+      temp: v('--c-temp'), humid: v('--c-humid'), press: v('--c-press'),
+      pirA: v('--c-pir-a'), pirB: v('--c-pir-b')
+    }
+  };
+}
+let THEME = readTheme();
+
+// "#rrggbb" に透明度を付ける（CSS 変数は16進で定義している前提）
+function withAlpha(hex, a) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!m) return hex;
+  return `rgba(${parseInt(m[1], 16)},${parseInt(m[2], 16)},${parseInt(m[3], 16)},${a})`;
+}
+
+Chart.defaults.font.family = THEME.font;
+
+// 軸の文字サイズ。スマホ幅では1px小さくして、目盛りに取られる幅を描画領域へ回す。
+function isNarrowChart(ctx) {
+  return ctx.chart && ctx.chart.width < 520;
+}
+function axisFont(ctx) {
+  return { size: isNarrowChart(ctx) ? 10 : 11 };
+}
+
+// ツールチップの1行: 「温度 24.3°C」。単位と小数桁は dataset に持たせた unit / decimals を使う。
+function tooltipLabel(ctx) {
+  const d = ctx.dataset;
+  const y = ctx.parsed.y;
+  if (y === null || y === undefined || isNaN(y)) return d.label;
+  const val = (typeof d.decimals === 'number') ? y.toFixed(d.decimals) : y;
+  return ` ${d.label}  ${val}${d.unit || ''}`;
+}
+
 const CHART_COMMON_OPTIONS = {
   animation: false,
+  // 高さは親の .chart-box（CSS）で決める。画面幅ごとに高さを変えられるようにするため。
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  layout: { padding: { top: 2, right: 2 } },
   scales: {
     x: {
       type: 'time',
@@ -526,10 +1065,81 @@ const CHART_COMMON_OPTIONS = {
     }
   },
   plugins: {
-    tooltip: { mode: 'index', intersect: false }
+    legend: {
+      align: 'end',
+      labels: {
+        color: () => THEME.text2,
+        usePointStyle: true,
+        pointStyle: 'circle',
+        boxWidth: 8,
+        boxHeight: 8,
+        padding: 10,
+        font: { size: 12, weight: '600' }
+      }
+    },
+    tooltip: {
+      mode: 'index',
+      intersect: false,
+      backgroundColor: () => THEME.tooltipBg,
+      titleColor: () => THEME.tooltipText,
+      bodyColor: () => THEME.tooltipText,
+      titleFont: { weight: '600' },
+      padding: 10,
+      cornerRadius: 8,
+      usePointStyle: true,
+      boxPadding: 4,
+      callbacks: { label: tooltipLabel }
+    }
   },
   responsive: true
 };
+
+// 線グラフ1系列の共通スタイル。点は描かず（数千点あると潰れて見えるため）、ホバー時だけ出す。
+function lineDataset(label, seriesKey, unit, decimals, extra) {
+  return Object.assign({
+    label: label,
+    data: [],
+    unit: unit,
+    decimals: decimals,
+    borderColor: () => THEME.series[seriesKey],
+    backgroundColor: () => withAlpha(THEME.series[seriesKey], 0.14),
+    borderWidth: 2,
+    pointRadius: 0,
+    pointHitRadius: 8,
+    pointHoverRadius: 4,
+    pointHoverBorderWidth: 2,
+    pointHoverBackgroundColor: () => THEME.surface,
+    fill: false
+  }, extra || {});
+}
+
+// 値軸（y）。seriesKey を渡すと目盛りをその系列色にする（3軸グラフで対応が分かるように）。
+function makeValueAxis(position, seriesKey, extra) {
+  return Object.assign({
+    position: position,
+    ticks: {
+      color: () => (seriesKey ? THEME.series[seriesKey] : THEME.text3),
+      maxTicksLimit: 6,
+      padding: 4,
+      font: axisFont,
+      // 既定の書式は桁区切り付き（"1,010.4"）で、右側の軸が幅を取るため区切りを外す
+      callback: (value) => String(Math.round(value * 100) / 100)
+    },
+    grid: { color: () => THEME.grid, drawTicks: false },
+    border: { display: false }
+  }, extra || {});
+}
+
+// OS のテーマ変更に追従（ページを開いたまま夜間にダークへ切り替わる端末向け）
+function refreshChartTheme() {
+  THEME = readTheme();
+  [chartTHP, chartPIR_A, chartPIR_B, chartMixTHP, chartMixPIR].forEach(c => { if (c) c.update('none'); });
+}
+if (window.matchMedia) {
+  const mql = window.matchMedia('(prefers-color-scheme: dark)');
+  if (mql.addEventListener) mql.addEventListener('change', refreshChartTheme);
+  else if (mql.addListener) mql.addListener(refreshChartTheme);
+}
 
 /* ---- pan/zoom 共通ヘルパー（Chart.js 4.5.1 + chartjs-plugin-zoom@2.2.0） ---- */
 // zoomKey を渡すと pan/zoom + 遅延ロードを有効化。v4 では表示範囲が scales.x.min/max に
@@ -549,7 +1159,9 @@ function makeTimeXAxis() {
       displayFormats: { hour: 'MM/DD HH:mm' },
       tooltipFormat: 'YYYY-MM-DD HH:mm:ss'
     },
-    ticks: { maxRotation: 0 }
+    ticks: { maxRotation: 0, autoSkipPadding: 12, color: () => THEME.text3, font: axisFont },
+    grid: { display: false },
+    border: { color: () => THEME.border }
   };
 }
 
@@ -589,41 +1201,45 @@ function createTHPChart(canvas, zoomKey) {
     ...CHART_COMMON_OPTIONS,
     scales: {
       x: makeTimeXAxis(),
-      y1: { position: 'left', ticks: { color: 'rgba(220,40,20,0.8)' } },
-      y2: { position: 'right', ticks: { color: 'rgba(60,90,220,0.8)' }, grid: { drawOnChartArea: false } },
-      y3: { position: 'right', ticks: { color: 'rgba(60,240,20,0.8)' }, grid: { drawOnChartArea: false } }
+      y1: makeValueAxis('left', 'temp'),
+      y2: makeValueAxis('right', 'humid', { grid: { drawOnChartArea: false, drawTicks: false } }),
+      y3: makeValueAxis('right', 'press', { grid: { drawOnChartArea: false, drawTicks: false } })
     }
   }, zoomKey);
 
+  // monotone は点を通る滑らかな補間で、実測値を超える山や谷を作らない
+  const smooth = { cubicInterpolationMode: 'monotone' };
   return new Chart(canvas, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: '温度', data: [], borderColor: 'rgba(220,40,20,0.8)', backgroundColor: 'rgba(220,40,20,0.15)', fill: false, yAxisID: "y1" },
-        { label: '湿度', data: [], borderColor: 'rgba(60,90,220,0.8)', backgroundColor: 'rgba(60,90,220,0.15)', fill: false, yAxisID: "y2" },
-        { label: '気圧', data: [], borderColor: 'rgba(60,240,20,0.8)', backgroundColor: 'rgba(60,240,20,0.15)', fill: false, yAxisID: "y3" }
+        lineDataset('温度', 'temp', '°C', 1, Object.assign({ yAxisID: 'y1' }, smooth)),
+        lineDataset('湿度', 'humid', '%', 1, Object.assign({ yAxisID: 'y2' }, smooth)),
+        lineDataset('気圧', 'press', 'hPa', 1, Object.assign({ yAxisID: 'y3' }, smooth))
       ]
     },
     options: options
   });
 }
 
-function createPIRChart(canvas, zoomKey) {
+// seriesKey: 'pirA' / 'pirB'（部屋ごとの色。まとめタブの比較グラフと色を揃える）
+function createPIRChart(canvas, zoomKey, seriesKey) {
   const options = withZoom({
     ...CHART_COMMON_OPTIONS,
     scales: {
       x: makeTimeXAxis(),
-      y: { beginAtZero: true }
+      y: makeValueAxis('left', null, { beginAtZero: true })
     }
   }, zoomKey);
+  options.plugins = { ...options.plugins, legend: { display: false } };
 
   return new Chart(canvas, {
     type: 'line',
     data: {
       labels: [],
       datasets: [
-        { label: '人感', data: [], borderColor: 'rgba(240,180,20,0.9)', backgroundColor: 'rgba(240,180,20,0.25)', fill: false }
+        lineDataset('人感', seriesKey || 'pirA', '回', 0, { fill: 'origin' })
       ]
     },
     options: options
@@ -635,7 +1251,7 @@ function createMixPIRChart(canvas, zoomKey) {
     ...CHART_COMMON_OPTIONS,
     scales: {
       x: makeTimeXAxis(),
-      y: { beginAtZero: true }
+      y: makeValueAxis('left', null, { beginAtZero: true })
     }
   }, zoomKey);
 
@@ -643,8 +1259,8 @@ function createMixPIRChart(canvas, zoomKey) {
     type: 'line',
     data: {
       datasets: [
-        { label: '部屋A', data: [], borderColor: 'rgba(240,180,20,0.9)', backgroundColor: 'rgba(240,180,20,0.15)', fill: false },
-        { label: '部屋B', data: [], borderColor: 'rgba(100,60,200,0.9)', backgroundColor: 'rgba(100,60,200,0.15)', fill: false }
+        lineDataset('部屋A', 'pirA', '回', 0),
+        lineDataset('部屋B', 'pirB', '回', 0)
       ]
     },
     options: options
@@ -714,15 +1330,44 @@ function fetchSensor(sensor, from, cb, sensorNo) {
 
 /* ---- update UI ---- */
 // 時間表示用のヘルパー関数
+// "YYYY-MM-DD HH:MM:SS" -> "MM/DD HH:MM"（グラフの時間軸と同じ書式）
 function formatTimeDisplay(timeString) {
-  return timeString.substr(5, 11); // MM-DD HH:MM 形式
+  return timeString.substr(5, 2) + '/' + timeString.substr(8, 2) + ' ' + timeString.substr(11, 5);
 }
 
-// 変化の矢印を取得するヘルパー関数
-function getChangeArrow(current, previous) {
-  if (current > previous) return ' ↑';
-  if (current < previous) return ' ↓';
-  return '';
+// 表示用の数値整形。センサー値は小数1桁で十分（生値はツールチップでも1桁）。
+function formatValue(value, decimals) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n.toFixed(decimals) : '-';
+}
+
+// 直前の計測値との比較を矢印アイコンで表示する
+function setTrend(el, current, previous) {
+  const $el = $(el).removeClass('is-up is-down').removeAttr('title');
+  if (current > previous) {
+    $el.addClass('is-up').attr('title', '直前の計測から上昇').html('<i class="fa fa-caret-up"></i>');
+  } else if (current < previous) {
+    $el.addClass('is-down').attr('title', '直前の計測から下降').html('<i class="fa fa-caret-down"></i>');
+  } else {
+    $el.empty();
+  }
+}
+
+// 温度・湿度・気圧カードの更新。prefix は '#latest' / '#mix-latest'
+function renderTHPStats(json, prefix, elMeasured) {
+  const keys = [['temp', 'temps'], ['humid', 'humids'], ['press', 'pressures']];
+  if (json.measures.length === 0) {
+    keys.forEach(([k]) => { $(`${prefix}-${k}`).text('-'); $(`${prefix}-${k}-trend`).empty(); });
+    $(elMeasured).text('データなし');
+    return;
+  }
+  const last = json.measures.length - 1;
+  const prev = Math.max(0, last - 1);
+  keys.forEach(([k, field]) => {
+    $(`${prefix}-${k}`).text(formatValue(json[field][last], 1));
+    setTrend(`${prefix}-${k}-trend`, json[field][last], json[field][prev]);
+  });
+  $(elMeasured).text(formatTimeDisplay(json.measures[last]) + ' 時点');
 }
 
 /* ---- pan/zoom + 過去への遅延ロード（汎用ファクトリ） ---- */
@@ -926,19 +1571,7 @@ function fetchPirRange(sensorNo, fromStr, toStr, cb) {
 
 // 最新値ラベルの更新（json 配列の末尾が最新）
 function updateTHPLatest(json) {
-  if (json.measures.length === 0) {
-    $('#latest-measured-thp').text('');
-    $('#latest-temp').text('温度 : -');
-    $('#latest-humid').text('湿度 : -');
-    $('#latest-press').text('気圧 : -');
-    return;
-  }
-  const last = json.measures.length - 1;
-  const prev = Math.max(0, last - 1);
-  $('#latest-measured-thp').text(formatTimeDisplay(json.measures[last]));
-  $('#latest-temp').text(`温度 : ${json.temps[last]}${getChangeArrow(json.temps[last], json.temps[prev])}`);
-  $('#latest-humid').text(`湿度 : ${json.humids[last]}${getChangeArrow(json.humids[last], json.humids[prev])}`);
-  $('#latest-press').text(`気圧 : ${json.pressures[last]}${getChangeArrow(json.pressures[last], json.pressures[prev])}`);
+  renderTHPStats(json, '#latest', '#latest-measured-thp');
 }
 
 /* ---- 遅延ローダー・インスタンス（チャートは init で生成、getChart で遅延取得） ---- */
@@ -1015,45 +1648,34 @@ function loadMixPIRBase(from) {
 /* ---- 最新値ラベル更新（基準ロードの JSON から算出） ---- */
 function updatePIRLatest(json, elMeasured, elCount) {
   if (json.measures.length === 0) {
-    $(elMeasured).text('');
-    $(elCount).text('カウント : -');
+    $(elMeasured).text('-');
+    $(elCount).text('-');
     return;
   }
   const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
   if (latestDetection) {
     $(elMeasured).text(formatTimeDisplay(latestDetection.time));
-    $(elCount).text(`カウント : ${latestDetection.count}`);
+    $(elCount).text(latestDetection.count);
   } else {
     $(elMeasured).text('検出なし');
-    $(elCount).text('カウント : 0');
+    $(elCount).text('0');
   }
 }
 
 function updateMixPIRLatest(json, room) {
   const elId = (room === 'A') ? '#mix-latest-a' : '#mix-latest-b';
-  const label = (room === 'A') ? '部屋A' : '部屋B';
-  if (!json) { $(elId).text(`${label} : 検出なし`); return; }
-  const latestDetection = findLatestNonZeroDetection(json.measures, json.counts);
+  const latestDetection = json ? findLatestNonZeroDetection(json.measures, json.counts) : null;
   if (latestDetection) {
-    $(elId).text(`${label} : ${formatTimeDisplay(latestDetection.time)} (${latestDetection.count}回)`);
+    $(elId).text(formatTimeDisplay(latestDetection.time));
+    $(`${elId}-count`).text(`${latestDetection.count}回`);
   } else {
-    $(elId).text(`${label} : 検出なし`);
+    $(elId).text('検出なし');
+    $(`${elId}-count`).text('');
   }
 }
 
 function updateMixTHPLatest(json) {
-  if (json.measures.length === 0) {
-    $('#mix-latest-temp').text('温度 : -');
-    $('#mix-latest-humid').text('湿度 : -');
-    $('#mix-latest-press').text('気圧 : -');
-    return;
-  }
-
-  const last = json.measures.length - 1;
-  const prev = Math.max(0, last - 1);
-  $('#mix-latest-temp').text(`温度 : ${json.temps[last]}${getChangeArrow(json.temps[last], json.temps[prev])}`);
-  $('#mix-latest-humid').text(`湿度 : ${json.humids[last]}${getChangeArrow(json.humids[last], json.humids[prev])}`);
-  $('#mix-latest-press').text(`気圧 : ${json.pressures[last]}${getChangeArrow(json.pressures[last], json.pressures[prev])}`);
+  renderTHPStats(json, '#mix-latest', '#mix-latest-measured');
 }
 
 // PIRセンサーの最新検出を見つけるヘルパー関数
@@ -1120,12 +1742,12 @@ $(function(){
 
   const pirCanvasA = document.createElement('canvas');
   $('#chart-pir-a').append(pirCanvasA);
-  chartPIR_A = createPIRChart(pirCanvasA.getContext('2d'), 'roomA-pir');
+  chartPIR_A = createPIRChart(pirCanvasA.getContext('2d'), 'roomA-pir', 'pirA');
   addDblClickReset(pirCanvasA, () => chartPIR_A);
 
   const pirCanvasB = document.createElement('canvas');
   $('#chart-pir-b').append(pirCanvasB);
-  chartPIR_B = createPIRChart(pirCanvasB.getContext('2d'), 'roomB-pir');
+  chartPIR_B = createPIRChart(pirCanvasB.getContext('2d'), 'roomB-pir', 'pirB');
   addDblClickReset(pirCanvasB, () => chartPIR_B);
 
   const mixThpCanvas = document.createElement('canvas');
@@ -1174,9 +1796,11 @@ $(function(){
   // 部屋Aサブタブ切替
   $('#roomA-subtabs button').on('click', function() {
     const subtab = $(this).data('subtab');
-    $('#roomA-subtabs button').removeClass('btn-primary active').addClass('btn-outline-primary');
-    $(this).removeClass('btn-outline-primary').addClass('btn-primary active');
+    $('#roomA-subtabs button').removeClass('active').attr('aria-selected', 'false');
+    $(this).addClass('active').attr('aria-selected', 'true');
     $('#roomA-thp, #roomA-pir-a').hide();
+    // 「〜時点」は温湿度の計測時刻なので、人感表示中は隠す
+    $('#latest-measured-thp').toggle(subtab === 'thp');
     $('#roomA-' + subtab).show();
   });
 
