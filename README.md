@@ -15,6 +15,25 @@
 
 ※ 在室検出は [m5atom-clock](https://github.com/gallipon/m5atom-clock)（時計デバイスに内蔵した人感センサー）からも送信される。
 
+## ダッシュボード
+
+<p align="center">
+  <img src="docs/images/dashboard-demo.gif" alt="スマートフォンでの操作デモ（ドラッグで過去へ移動・縮小・表示切替）" width="300">
+</p>
+
+| スマートフォン | ダークモード | まとめ（部屋の比較） |
+|:---:|:---:|:---:|
+| <img src="docs/images/dashboard-mobile.png" alt="スマートフォン表示" width="240"> | <img src="docs/images/dashboard-mobile-dark.png" alt="ダークモード" width="240"> | <img src="docs/images/dashboard-mobile-summary.png" alt="まとめタブ" width="240"> |
+
+<img src="docs/images/dashboard-desktop.png" alt="PC 表示">
+
+- 最新値と時系列グラフ（温度・湿度・気圧は 3 軸で重ねて表示）
+- ドラッグで過去へさかのぼると、表示に必要な期間だけ追加で読み込む（長い期間は 5 分平均に間引き）
+- ピンチ／ホイールで拡大縮小、ダブルクリックで元に戻す
+- OS のライト／ダーク設定に追従
+
+※ 画像はダミーデータで撮影したもの。
+
 ## 構成
 
 | | 役割 | 技術 |
