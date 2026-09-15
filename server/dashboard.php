@@ -1168,9 +1168,176 @@ function makeTimeXAxis() {
 // zoom プラグイン設定（options.plugins.zoom）。完了コールバックは引数形状に依存せず、
 // zoomKey で登録済みのローダーを registry から引いて起動する。
 // v2 では zoom.enabled が廃止され、wheel / pinch / drag を個別に指定する。
+/* ---- グラフ上のタッチ縦スクロール ---- */
+// Hammer.js が canvas に touch-action: none を付けるため、グラフ上で縦にスワイプしても
+// ブラウザはページをスクロールしない。touch-action: pan-y にすると iPad Safari でピンチが
+// 途中で打ち切られた（2026-09-14）ので、touch-action には触らずに次のようにする:
+//   - 縦横の判定は Hammer の pan 開始時（zoom プラグインの onPanStart）に行う
+//   - 縦なら pan を取り消し、以後の touchmove の移動量だけ JS でページをスクロールする
+//   - 指を離したときの速度で慣性スクロールする
+// 2本指（ピンチ）とマウス操作は判定の対象外なので、従来どおりグラフが受け取る。
+const touchScroll = (function() {
+  let active = false;   // この指の操作をスクロールとして扱っているか
+  let lastY = 0;
+  let lastT = 0;
+  let velocity = 0;     // px/ms（上方向スクロールが正）
+  let raf = 0;
+
+  function stopInertia() {
+    if (raf) cancelAnimationFrame(raf);
+    raf = 0;
+  }
+  function onStart(e) {
+    active = false;
+    if (e.touches.length === 1) {
+      lastY = e.touches[0].clientY;
+      lastT = e.timeStamp;
+      velocity = 0;
+    }
+  }
+  function onMove(e) {
+    if (e.touches.length !== 1) { active = false; return; }
+    const y = e.touches[0].clientY;
+    if (active) {
+      const dy = lastY - y;
+      window.scrollBy(0, dy);
+      const dt = Math.max(1, e.timeStamp - lastT);
+      velocity = 0.8 * (dy / dt) + 0.2 * velocity;
+    }
+    lastY = y;
+    lastT = e.timeStamp;
+  }
+  function onEnd(e) {
+    if (!active) return;
+    active = false;
+    if (e.timeStamp - lastT > 80) return;  // 指を止めてから離したときは滑らせない
+    let v = velocity;
+    let prev = performance.now();
+    const step = (now) => {
+      const dt = now - prev;
+      prev = now;
+      window.scrollBy(0, v * dt);
+      v *= Math.pow(0.95, dt / 16);
+      raf = Math.abs(v) > 0.02 ? requestAnimationFrame(step) : 0;
+    };
+    raf = requestAnimationFrame(step);
+  }
+  // 慣性スクロール中にどこかを触ったら止める（ネイティブのスクロールと同じ振る舞い）
+  document.addEventListener('touchstart', stopInertia, { passive: true });
+
+  return {
+    attach: function(canvas) {
+      canvas.addEventListener('touchstart', onStart, { passive: true });
+      canvas.addEventListener('touchmove', onMove, { passive: true });
+      canvas.addEventListener('touchend', onEnd, { passive: true });
+      canvas.addEventListener('touchcancel', () => { active = false; }, { passive: true });
+    },
+    // Hammer の panstart イベントを受け取り、縦方向のタッチなら true（= pan を取り消す）。
+    claim: function(hammerEvent) {
+      if (!hammerEvent || hammerEvent.pointerType !== 'touch') return false;
+      if (Math.abs(hammerEvent.deltaY) <= Math.abs(hammerEvent.deltaX)) return false;
+      active = true;
+      return true;
+    }
+  };
+})();
+
+/* ---- タッチ操作時のツールチップ ---- */
+// Chart.js は touchstart / touchmove でツールチップを出すため、スクロールやパンのために触っただけで
+// ポップアップが出て、指を離しても残り、下のグラフを隠していた。タッチのときだけ次のように変える:
+//   - 指を置いた・動かしただけでは出さない（ドラッグやピンチを始めたら表示中のものも消す）
+//   - 動かさずに離した（タップ）ときだけ、その位置の値を出す
+//   - 表示中にもう一度タップすると消す。グラフの外をタップしても消す
+// マウス（PC）のホバー表示は従来どおり。
+const TAP_MOVE_PX = 10;
+let lastTouchAt = 0;  // タップ後にブラウザが出す互換マウスイベント（mousemove/click）を無視するため
+
+function isTooltipVisible(chart) {
+  return !!(chart.tooltip && chart.tooltip.getActiveElements().length > 0);
+}
+function hideTooltip(chart) {
+  if (!isTooltipVisible(chart)) return;
+  chart.tooltip.setActiveElements([], { x: 0, y: 0 });
+  chart.setActiveElements([]);
+  chart.update('none');
+}
+// canvas 内座標 (x, y) に最も近い時刻の値をツールチップで出す（interaction: index と同じ選び方）
+function showTooltipAt(chart, x, y) {
+  // 'native' を持つオブジェクトは Chart.js が座標をそのまま使う（ChartEvent と同じ扱い）
+  const found = chart.getElementsAtEventForMode({ native: null, x: x, y: y }, 'index', { intersect: false, axis: 'x' }, false);
+  if (!found.length) return;
+  const active = found.map(el => ({ datasetIndex: el.datasetIndex, index: el.index }));
+  chart.setActiveElements(active);
+  chart.tooltip.setActiveElements(active, { x: x, y: y });
+  chart.update('none');
+}
+
+Chart.register({
+  id: 'touchTooltip',
+  beforeEvent: function(chart, args) {
+    // ChartEvent.type は touchstart→mousedown / touchmove→mousemove に読み替えられているので、
+    // 元のブラウザイベントの種類（native.type）で判定する。
+    const native = args.event && args.event.native;
+    const type = native && native.type;
+    // タッチでの表示は attachTouchTooltip が担当するので、Chart.js 自身には処理させない
+    if (type === 'touchstart' || type === 'touchmove') return false;
+    if ((type === 'mousemove' || type === 'click' || type === 'mouseout') && Date.now() - lastTouchAt < 1000) return false;
+  }
+});
+
+function attachTouchTooltip(chart) {
+  const canvas = chart.canvas;
+  let start = null;  // { x, y, wasVisible }。タップ候補でなくなったら null
+
+  canvas.addEventListener('touchstart', (e) => {
+    lastTouchAt = Date.now();
+    if (e.touches.length !== 1) { start = null; hideTooltip(chart); return; }
+    const t = e.touches[0];
+    start = { x: t.clientX, y: t.clientY, wasVisible: isTooltipVisible(chart) };
+  }, { passive: true });
+
+  canvas.addEventListener('touchmove', (e) => {
+    lastTouchAt = Date.now();
+    if (!start) return;
+    const t = e.touches[0];
+    if (e.touches.length !== 1 || Math.hypot(t.clientX - start.x, t.clientY - start.y) > TAP_MOVE_PX) {
+      start = null;
+      hideTooltip(chart);
+    }
+  }, { passive: true });
+
+  canvas.addEventListener('touchend', () => {
+    lastTouchAt = Date.now();
+    if (!start) return;
+    const s = start;
+    start = null;
+    if (s.wasVisible) { hideTooltip(chart); return; }
+    const r = canvas.getBoundingClientRect();
+    showTooltipAt(chart, s.x - r.left, s.y - r.top);
+  }, { passive: true });
+
+  canvas.addEventListener('touchcancel', () => { start = null; }, { passive: true });
+}
+
+function allCharts() {
+  return [chartTHP, chartPIR_A, chartPIR_B, chartMixTHP, chartMixPIR].filter(Boolean);
+}
+// グラフの外をタップしたら、表示中のツールチップをすべて閉じる
+document.addEventListener('touchstart', (e) => {
+  lastTouchAt = Date.now();
+  if (e.target && e.target.tagName === 'CANVAS') return;
+  allCharts().forEach(hideTooltip);
+}, { passive: true });
+
 function makeZoomPlugin(zoomKey) {
   return {
-    pan: { enabled: true, mode: 'x', onPanComplete: () => triggerLazy(zoomKey) },
+    pan: {
+      enabled: true,
+      mode: 'x',
+      // false を返すとプラグインはこの pan を開始しない
+      onPanStart: (ctx) => !touchScroll.claim(ctx.event),
+      onPanComplete: () => triggerLazy(zoomKey)
+    },
     zoom: {
       wheel: { enabled: true, speed: 0.1 },
       pinch: { enabled: true },
@@ -1759,6 +1926,11 @@ $(function(){
   $('#chart-mix-pir').append(mixPirCanvas);
   chartMixPIR = createMixPIRChart(mixPirCanvas.getContext('2d'), 'mix-pir');
   addDblClickReset(mixPirCanvas, () => chartMixPIR);
+
+  // グラフ上の縦スワイプでページをスクロールできるようにする（touchScroll 参照）
+  [thpCanvas, pirCanvasA, pirCanvasB, mixThpCanvas, mixPirCanvas].forEach(c => touchScroll.attach(c));
+  // タッチではタップしたときだけツールチップを出す（attachTouchTooltip 参照）
+  allCharts().forEach(attachTouchTooltip);
 
   // Tempus Dominus 初期化（共通ピッカー）
   $('#datetimepicker-common').datetimepicker({
