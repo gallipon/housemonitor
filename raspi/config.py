@@ -6,8 +6,8 @@ load_dotenv()
 
 # API設定
 API_BASE_URL = os.environ.get('HOUSEMONITOR_API_URL', 'https://example.com')
-BME280_ENDPOINT = f'{API_BASE_URL}/qaqaqaa.php'
-PIR_ENDPOINT = f'{API_BASE_URL}/qaqaqab.php'
+BME280_ENDPOINT = f'{API_BASE_URL}/api/bme280.php'
+PIR_ENDPOINT = f'{API_BASE_URL}/api/pir.php'
 
 # API認証
 API_KEY = os.environ.get('HOUSEMONITOR_API_KEY', '')
